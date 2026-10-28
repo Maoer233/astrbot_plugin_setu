@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .detail import build_detail, make_rng, make_seed
+from .detail_dto import FortuneDetail
 from .entities import (
     FortuneConfig,
     FortuneGenerationRequest,
@@ -19,4 +21,8 @@ __all__ = [
     "FortuneWeights",
     "FortuneResult",
     "FortuneSeed",
+    "FortuneDetail",
+    "build_detail",
+    "make_rng",
+    "make_seed",
 ]

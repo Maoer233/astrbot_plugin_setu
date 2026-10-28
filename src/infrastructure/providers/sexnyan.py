@@ -10,6 +10,7 @@ import asyncio
 import httpx
 
 from ...domain import HTTP_TIMEOUT_SECONDS
+from ...domain.setu import ImageMeta, build_meta
 from ...shared import get_logger
 from .base import DownloadingSetuImageProvider
 
@@ -47,7 +48,7 @@ class SexNyanRunProvider(DownloadingSetuImageProvider):
         tags: list[str],
         r18: bool,
         exclude_ai: bool = True,
-    ) -> list[str]:
+    ) -> list[ImageMeta]:
         logger.info(
             "[provider] SexNyan request: count=%d, r18=%s, tags=%s, "
             "proxy=%s, uid=%d, keyword=%s",
@@ -97,9 +98,12 @@ class SexNyanRunProvider(DownloadingSetuImageProvider):
                 if img_url:
                     urls.append(img_url)
         urls = self._apply_proxy_to_urls(urls, self.proxy, "SexNyanRunProvider")
+        # SexNyan 的响应不含标题/作者/标签，元数据只能填 URL；
+        # 下游按 has_details 判断是否渲染说明区，这里不会造出空标题卡片。
+        metas = [build_meta(url, provider="sexnyan") for url in urls]
         logger.info(
-            "[provider] SexNyan response: requested=%d, returned=%d",
+            "[provider] SexNyan response: requested=%d, returned=%d, with_tags=0",
             num,
-            len(urls),
+            len(metas),
         )
-        return urls
+        return metas

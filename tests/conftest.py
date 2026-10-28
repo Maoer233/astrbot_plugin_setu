@@ -15,6 +15,7 @@ for parent in Path(__file__).resolve().parents:
         break
 
 from astrbot.api.event import AstrMessageEvent  # noqa: E402
+from astrbot.core import AstrBotConfig  # noqa: E402
 
 
 @pytest.fixture
@@ -30,6 +31,20 @@ def temp_data_dir(tmp_path: Path) -> Path:
     data_dir = tmp_path / "plugin_data"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
+
+
+@pytest.fixture
+def mock_astrbot_config() -> AstrBotConfig:
+    """Create mock AstrBotConfig.
+
+    Returns:
+        Mock AstrBotConfig with basic structure
+    """
+    config = MagicMock(spec=AstrBotConfig)
+    config.__setitem__ = MagicMock()
+    config.__getitem__ = MagicMock(return_value={})
+    config.get = MagicMock(return_value=None)
+    return config
 
 
 @pytest.fixture
@@ -71,6 +86,68 @@ def mock_event() -> AstrMessageEvent:
 
 
 @pytest.fixture
+def mock_plugin_context() -> Any:
+    """Create mock plugin context.
+
+    Returns:
+        Mock context with send_message method
+    """
+    context = MagicMock()
+    context.send_message = MagicMock()
+
+    async def mock_send(origin: str, result: Any) -> Any:
+        return {"message_id": "test_msg_123"}
+
+    context.send_message.side_effect = mock_send
+    return context
+
+
+@pytest.fixture
+def sample_image_bytes() -> bytes:
+    """Create sample image bytes for testing.
+
+    Returns:
+        Small PNG image bytes
+    """
+    # Minimal PNG (1x1 transparent pixel)
+    return (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+        b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+
+@pytest.fixture
+def mock_provider() -> Any:
+    """Create mock image provider.
+
+    Returns:
+        Mock provider with fetch_image_urls method
+    """
+    provider = MagicMock()
+
+    async def mock_fetch(
+        num: int, tags: list[str], r18: bool, exclude_ai: bool
+    ) -> list[Any]:
+        from astrbot_plugin_setu.src.domain.setu.meta import build_meta
+
+        return [
+            build_meta(
+                f"https://example.com/image{i}.jpg",
+                title=f"title-{i}",
+                author="author",
+                pid=i,
+                tags=["女孩子", "双马尾"],
+                provider="mock",
+            )
+            for i in range(num)
+        ]
+
+    provider.fetch_image_urls = MagicMock(side_effect=mock_fetch)
+    return provider
+
+
+@pytest.fixture
 def sample_config_dict() -> dict[str, Any]:
     """Create sample plugin configuration.
 
@@ -80,29 +157,52 @@ def sample_config_dict() -> dict[str, Any]:
     return {
         "setu_general": {
             "api_type": "lolicon",
+            "multi_api_strategy": "round_robin",
             "content_mode": "sfw",
             "max_count": 10,
+            "max_replenish_rounds": 3,
         },
         "delivery": {
             "send_mode": "auto",
-            "html_card_strategy": "fallback",
             "doujinshi_send_mode": "pdf",
             "r18_docx_mode": True,
             "auto_revoke_scope": "none",
             "auto_revoke_delay": 30,
             "platform_transports": [],
         },
+        "html_card": {
+            "strategy": "fallback",
+            "mode": "single",
+            "card_padding": 6,
+            "card_gap": 6,
+        },
         "fortune": {
             "enabled": True,
+            "api_type": "inherit",
             "tags": "",
             "content_mode": "sfw",
             "allow_user_refresh": False,
             "auto_refresh": True,
         },
+        "cache": {
+            "enabled": True,
+            "ttl_hours": 2,
+            "max_items": 200,
+            "cleanup_on_start": True,
+        },
         "api": {
             "provider_overrides": [
                 {
                     "__template_key": "lolicon",
+                    "image_size": "original",
+                    "proxy": "",
+                    "aspect_ratio": "",
+                    "uid": [],
+                    "keyword": "",
+                    "exclude_ai": True,
+                },
+                {
+                    "__template_key": "atri",
                     "image_size": "original",
                     "proxy": "",
                     "aspect_ratio": "",
@@ -119,6 +219,25 @@ def sample_config_dict() -> dict[str, Any]:
             ],
             "custom_api_configs": [],
         },
-        "safety": [],
+        "messages": {
+            "fetching": {"enabled": True, "text": "正在获取图片，请稍候..."},
+            "found": {"enabled": True, "text": "找到 {count} 张符合要求的图片~"},
+            "send_failed": {"enabled": True, "text": "图片发送失败，请稍后再试。"},
+        },
+        "safety": {
+            "setu_user_access_control_mode": "none",
+            "setu_group_access_control_mode": "none",
+            "setu_blocked_users": [],
+            "setu_whitelist_users": [],
+            "setu_blocked_groups": [],
+            "setu_whitelist_groups": [],
+            "fortune_user_access_control_mode": "none",
+            "fortune_group_access_control_mode": "none",
+            "fortune_blocked_users": [],
+            "fortune_whitelist_users": [],
+            "fortune_blocked_groups": [],
+            "fortune_whitelist_groups": [],
+        },
         "session_configs": [],
+        "fortune_session_configs": [],
     }

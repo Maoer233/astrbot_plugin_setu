@@ -20,33 +20,68 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core import AstrBotConfig
 
-from .src.domain.setu.triggers import TriggerMatch, match_trigger
 from .src.infrastructure import (
     init_access_control_repo,
     init_fortune_repo,
     init_provider_from_config,
+    init_session_config_repo,
 )
-from .src.infrastructure.astrbot import get_config, init_config, set_plugin_context
+from .src.infrastructure.astrbot import init_config, set_plugin_context
+from .src.infrastructure.astrbot.access_control_api import (
+    register_access_control_web_apis,
+)
 from .src.infrastructure.astrbot.commands import (
     FortuneCommandHandler,
+    SessionConfigCommandHandler,
     SetuCommandHandler,
     register_fortune_llm_tools,
+    register_session_config_llm_tools,
     register_setu_llm_tools,
     unregister_fortune_llm_tools,
+    unregister_session_config_llm_tools,
     unregister_setu_llm_tools,
 )
+from .src.infrastructure.astrbot.session_config_api import (
+    register_session_config_web_apis,
+)
 from .src.infrastructure.config import heal_astrbot_plugin_config
-from .src.infrastructure.config.legacy_data_migration import migrate_plugin_config
 from .src.infrastructure.sending import (
     init_revoke_scheduler,
     stop_revoke_scheduler,
 )
 from .src.shared.send_cache import clear_send_cache, init_send_cache
 
+# Regex patterns for command triggers
+SETU_REGEX_PATTERN = r"^/?(来\s*(.*?)(份|个|张|点))(.*?)(?:福利|色|瑟|涩|塞)?图$"
+DOUJINSHI_REGEX_PATTERN = r"^/?来\s*(?:一\s*)?份(?P<tags>.*?)本子$"
+FORTUNE_REGEX_PATTERN = r"^(?!/)(今日运势|jrys)$"
+REGEX_COMMAND_PATTERN = (
+    rf"(?:{SETU_REGEX_PATTERN}|{DOUJINSHI_REGEX_PATTERN}|{FORTUNE_REGEX_PATTERN})"
+)
+
 # Module-level handler singletons
 _setu_handler: SetuCommandHandler | None = None
 _fortune_handler: FortuneCommandHandler | None = None
+_session_config_handler: SessionConfigCommandHandler | None = None
 
+FORTUNE_REFRESH_COMMANDS = {
+    "刷新今日运势": "self",
+    "刷新jrys": "self",
+    "flush_jrys": "self",
+    "刷新本群今日运势": "group",
+    "刷新本群jrys": "group",
+    "flush_group_jrys": "group",
+    "刷新全局今日运势": "all",
+    "刷新全局jrys": "all",
+    "flush_all_jrys": "all",
+}
+FORTUNE_TOGGLE_COMMANDS = {"开启运势": "enable", "关闭运势": "disable"}
+FORTUNE_USER_COMMANDS = {
+    "拉黑运势用户": "block",
+    "解除运势拉黑": "unblock",
+    "信任运势用户": "trust",
+    "取消运势信任": "untrust",
+}
 FORTUNE_REFRESH_ARG_ALIASES = {
     "": "self",
     "我": "self",
@@ -62,6 +97,31 @@ FORTUNE_REFRESH_ARG_ALIASES = {
     "all": "all",
     "global": "all",
 }
+FORTUNE_TOGGLE_ARG_ALIASES = {
+    "开": "enable",
+    "开启": "enable",
+    "on": "enable",
+    "关": "disable",
+    "关闭": "disable",
+    "off": "disable",
+}
+FORTUNE_USER_ARG_ALIASES = {
+    "拉黑": "block",
+    "黑名单": "block",
+    "block": "block",
+    "解除拉黑": "unblock",
+    "解黑": "unblock",
+    "取消拉黑": "unblock",
+    "unblock": "unblock",
+    "信任": "trust",
+    "白名单": "trust",
+    "trust": "trust",
+    "取消信任": "untrust",
+    "移除信任": "untrust",
+    "取消白名单": "untrust",
+    "untrust": "untrust",
+}
+
 _LEADING_COMMAND_PREFIX_PATTERN = re.compile(r"^[^\w\u4e00-\u9fff]+")
 
 
@@ -83,49 +143,57 @@ def _is_fortune_command_invocation(event: AstrMessageEvent) -> bool:
     return _get_invoked_command(event) in {"今日运势", "jrys"}
 
 
+def _stop_llm_processing(event: AstrMessageEvent) -> None:
+    """Stop the message from also being handled as an LLM request.
+
+    ``/setu`` has two entry points: this plugin's command handler and the
+    ``get_setu_image`` LLM tool.  Both send pictures.  Without stopping the
+    event after the command path runs, one instruction produces two sets of
+    images (observed in production as "5 images + 1 extra image card").
+    """
+    stopper = getattr(event, "stop_event", None)
+    if callable(stopper):
+        try:
+            stopper()
+        except Exception as exc:  # 框架版本差异，不影响主流程
+            logger.debug("[setu] stop_event failed: %s", exc)
+
+
 async def _route_regex_command(
     event: AstrMessageEvent,
     setu_handler: SetuCommandHandler | None,
     fortune_handler: FortuneCommandHandler | None,
 ) -> AsyncGenerator[Any, None]:
-    """把首条匹配短语分发给业务处理器。"""
-    matched = _match_natural_trigger(event)
-    if matched is None:
+    """把所有纯文本正则入口集中分发到对应命令处理器。"""
+    message = str(getattr(event, "message_str", "") or "").strip()
+    if re.match(SETU_REGEX_PATTERN, message):
+        if setu_handler is None:
+            yield event.plain_result("插件未初始化")
+            return
+        async for result in setu_handler.get_random_picture(event):
+            yield result
+        _stop_llm_processing(event)
         return
-    if matched.kind == "setu" and setu_handler is not None:
-        async for result in setu_handler.setu_command(
-            event, matched.count, tags=matched.tags, natural=True
-        ):
+
+    if doujinshi_match := re.match(DOUJINSHI_REGEX_PATTERN, message):
+        if setu_handler is None:
+            yield event.plain_result("插件未初始化")
+            return
+        tags = doujinshi_match.group("tags").strip()
+        async for result in setu_handler.random_doujinshi_command(event, tags=tags):
             yield result
-    elif matched.kind == "doujinshi" and setu_handler is not None:
-        async for result in setu_handler.random_doujinshi_command(
-            event, tags=matched.tags
-        ):
-            yield result
-    elif matched.kind == "fortune" and fortune_handler is not None:
+        _stop_llm_processing(event)
+        return
+
+    if re.match(FORTUNE_REGEX_PATTERN, message):
+        if _is_fortune_command_invocation(event):
+            return
+        if fortune_handler is None:
+            yield event.plain_result("插件未初始化")
+            return
         async for result in fortune_handler.fortune_command(event):
             yield result
-
-
-def _match_natural_trigger(event: AstrMessageEvent) -> TriggerMatch | None:
-    config = get_config()
-    if config is None or not config.setu_general.natural_language_enabled:
-        return None
-    # AstrBot may invoke both the command and natural-language handlers for one message.
-    if _is_fortune_command_invocation(event) or (
-        getattr(event, "is_at_or_wake_command", False)
-        and _get_invoked_command(event)
-        in {"setu", "随机本子", "本子", "doujinshi", "运势刷新"}
-    ):
-        return None
-    return match_trigger(
-        str(event.message_str or "").strip(), config.setu_general.trigger_templates
-    )
-
-
-class NaturalLanguageFilter(filter.CustomFilter):
-    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
-        return _match_natural_trigger(event) is not None
+        _stop_llm_processing(event)
 
 
 def _fortune_auto_refresh_enabled(config: Any) -> bool:
@@ -154,10 +222,42 @@ def _load_conf_schema() -> dict[str, Any]:
 
 
 def _resolve_fortune_refresh_target(event: AstrMessageEvent, args: str) -> str:
+    command = _get_invoked_command(event)
+    if command in FORTUNE_REFRESH_COMMANDS:
+        return FORTUNE_REFRESH_COMMANDS[command]
+
     target = FORTUNE_REFRESH_ARG_ALIASES.get((args or "").strip().lower())
     if target:
         return target
     raise ValueError("用法：/运势刷新 [我|本群|全局]")
+
+
+def _resolve_fortune_toggle_action(event: AstrMessageEvent, args: str) -> str:
+    command = _get_invoked_command(event)
+    if command in FORTUNE_TOGGLE_COMMANDS:
+        return FORTUNE_TOGGLE_COMMANDS[command]
+
+    action = FORTUNE_TOGGLE_ARG_ALIASES.get((args or "").strip().lower())
+    if action:
+        return action
+    raise ValueError("用法：/运势开关 <开|关>")
+
+
+def _resolve_fortune_user_action(event: AstrMessageEvent, args: str) -> tuple[str, str]:
+    command = _get_invoked_command(event)
+    if command in FORTUNE_USER_COMMANDS:
+        return FORTUNE_USER_COMMANDS[command], args
+
+    normalized_args = (args or "").strip()
+    if not normalized_args:
+        raise ValueError("用法：/运势用户 <拉黑|解黑|信任|取消信任> [用户]")
+
+    parts = normalized_args.split(maxsplit=1)
+    action = FORTUNE_USER_ARG_ALIASES.get(parts[0].lower())
+    if not action:
+        raise ValueError("用法：/运势用户 <拉黑|解黑|信任|取消信任> [用户]")
+    target = parts[1] if len(parts) > 1 else ""
+    return action, target
 
 
 class SetuPlugin(Star):
@@ -173,22 +273,23 @@ class SetuPlugin(Star):
         self.context = context
         self._plugin_config = config
         self._fortune_pregenerate_task: asyncio.Task[None] | None = None
+        register_access_control_web_apis(self.context)
+        register_session_config_web_apis(self.context)
 
     async def initialize(self) -> None:
-        global _setu_handler, _fortune_handler
+        global _setu_handler, _fortune_handler, _session_config_handler
 
-        data_dir = Path(StarTools.get_data_dir(self.name))
-        migrate_plugin_config(data_dir, self._plugin_config)
         raw_config = self._runtime_plugin_config()
         raw_config = self._heal_runtime_plugin_config(raw_config)
         cfg = init_config(raw_config)
         set_plugin_context(self.context)
+        data_dir = StarTools.get_data_dir(self.name)
 
         init_provider_from_config(cfg)
 
-        await init_access_control_repo(cfg.safety)
-        if cfg.fortune.enabled:
-            await init_fortune_repo(data_dir)
+        await init_access_control_repo(data_dir, raw_config)
+        await init_fortune_repo(data_dir)
+        await init_session_config_repo(data_dir)
         await init_send_cache(
             data_dir,
             enabled=cfg.cache_enabled,
@@ -204,28 +305,29 @@ class SetuPlugin(Star):
             revoke_scheduler=revoke_scheduler,
         )
         _fortune_handler = FortuneCommandHandler()
+        _session_config_handler = SessionConfigCommandHandler()
         if _fortune_auto_refresh_enabled(cfg):
             self._fortune_pregenerate_task = asyncio.create_task(
                 self._fortune_pregenerate_loop(), name="setu_fortune_pregenerate"
             )
 
         try:
-            if cfg.setu_general.llm_tools_enabled:
-                register_setu_llm_tools()
-                if cfg.fortune.enabled:
-                    register_fortune_llm_tools()
+            register_setu_llm_tools()
+            register_fortune_llm_tools()
+            register_session_config_llm_tools()
         except Exception as e:
             logger.warning("Failed to register LLM tools: %s", e)
 
         logger.info("SetuPlugin initialized successfully")
 
     async def terminate(self) -> None:
-        global _setu_handler, _fortune_handler
+        global _setu_handler, _fortune_handler, _session_config_handler
 
         from .src.infrastructure import (
             clear_fortune_repo,
             clear_provider,
             clear_repo,
+            clear_session_config_repo,
         )
 
         if self._fortune_pregenerate_task is not None:
@@ -237,17 +339,20 @@ class SetuPlugin(Star):
         try:
             unregister_setu_llm_tools()
             unregister_fortune_llm_tools()
+            unregister_session_config_llm_tools()
         except Exception:
             pass
 
         clear_provider()
         clear_repo()
         clear_fortune_repo()
+        clear_session_config_repo()
         await stop_revoke_scheduler()
         clear_send_cache()
 
         _setu_handler = None
         _fortune_handler = None
+        _session_config_handler = None
 
         logger.info("SetuPlugin terminated")
 
@@ -303,7 +408,6 @@ class SetuPlugin(Star):
             if callable(clear) and callable(update):
                 clear()
                 update(healed_config)
-                target.save_config()
                 return True
 
             pop = getattr(target, "pop", None)
@@ -315,7 +419,6 @@ class SetuPlugin(Star):
 
             for key, value in healed_config.items():
                 target[key] = value
-            target.save_config()
             return True
         except Exception as exc:
             logger.debug("failed to persist healed Setu config: %s", exc)
@@ -323,9 +426,9 @@ class SetuPlugin(Star):
 
     # ==================== Setu Commands ====================
 
-    @filter.custom_filter(NaturalLanguageFilter)
+    @filter.regex(REGEX_COMMAND_PATTERN)
     async def regex_command(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
-        """集中处理已匹配的自然语句。"""
+        """集中处理所有纯文本正则命令入口。"""
         async for result in _route_regex_command(
             event, _setu_handler, _fortune_handler
         ):
@@ -341,6 +444,8 @@ class SetuPlugin(Star):
             return
         async for result in _setu_handler.setu_command(event, count, tags=tags):
             yield result
+        # 命令已自行发图；阻止同一消息再被 LLM 工具处理一次。
+        _stop_llm_processing(event)
 
     @filter.command("随机本子", alias={"本子", "doujinshi"})
     async def random_doujinshi_command(
@@ -351,6 +456,18 @@ class SetuPlugin(Star):
             yield event.plain_result("插件未初始化")
             return
         async for result in _setu_handler.random_doujinshi_command(event, tags=tags):
+            yield result
+        _stop_llm_processing(event)
+
+    @filter.command("session_config")
+    async def session_config_command(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> AsyncGenerator[Any, None]:
+        """/session_config get|set|clear"""
+        if _session_config_handler is None:
+            yield event.plain_result("插件未初始化")
+            return
+        async for result in _session_config_handler.session_config_command(event, args):
             yield result
 
     # ==================== Fortune Commands ====================
@@ -365,8 +482,23 @@ class SetuPlugin(Star):
             return
         async for result in _fortune_handler.fortune_command(event):
             yield result
+        # 运势卡已发出；阻止同一条消息再走 LLM 工具导致重复出卡。
+        _stop_llm_processing(event)
 
-    @filter.command("运势刷新")
+    @filter.command(
+        "运势刷新",
+        alias={
+            "刷新今日运势",
+            "刷新jrys",
+            "flush_jrys",
+            "刷新本群今日运势",
+            "刷新本群jrys",
+            "flush_group_jrys",
+            "刷新全局今日运势",
+            "刷新全局jrys",
+            "flush_all_jrys",
+        },
+    )
     async def fortune_refresh_command(
         self, event: AstrMessageEvent, args: str = ""
     ) -> AsyncGenerator[Any, None]:
@@ -387,4 +519,53 @@ class SetuPlugin(Star):
             "all": _fortune_handler.refresh_all_fortune_command,
         }
         async for result in handler_map[target](event):
+            yield result
+
+    @filter.command("运势开关", alias={"开启运势", "关闭运势"})
+    async def fortune_toggle_command(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> AsyncGenerator[Any, None]:
+        """运势开关 <开|关>"""
+        if _fortune_handler is None:
+            yield event.plain_result("插件未初始化")
+            return
+
+        try:
+            action = _resolve_fortune_toggle_action(event, args)
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
+
+        handler_map = {
+            "enable": _fortune_handler.enable_fortune_group_command,
+            "disable": _fortune_handler.disable_fortune_group_command,
+        }
+        async for result in handler_map[action](event, ""):
+            yield result
+
+    @filter.command(
+        "运势用户",
+        alias={"拉黑运势用户", "解除运势拉黑", "信任运势用户", "取消运势信任"},
+    )
+    async def fortune_user_command(
+        self, event: AstrMessageEvent, args: str = ""
+    ) -> AsyncGenerator[Any, None]:
+        """运势用户 <拉黑|解黑|信任|取消信任> [用户]"""
+        if _fortune_handler is None:
+            yield event.plain_result("插件未初始化")
+            return
+
+        try:
+            action, target = _resolve_fortune_user_action(event, args)
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
+
+        handler_map = {
+            "block": _fortune_handler.block_fortune_user_command,
+            "unblock": _fortune_handler.unblock_fortune_user_command,
+            "trust": _fortune_handler.trust_fortune_user_command,
+            "untrust": _fortune_handler.untrust_fortune_user_command,
+        }
+        async for result in handler_map[action](event, target):
             yield result

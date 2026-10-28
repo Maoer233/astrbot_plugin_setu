@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from urllib.parse import quote
 
 import httpx
 
 from ...domain import HTTP_TIMEOUT_SECONDS
+from ...domain.setu import ImageMeta, build_meta
 from ...shared import get_logger
 from .base import DownloadingSetuImageProvider
 
@@ -54,7 +56,7 @@ class LoliconProvider(DownloadingSetuImageProvider):
         tags: list[str],
         r18: bool,
         exclude_ai: bool = True,
-    ) -> list[str]:
+    ) -> list[ImageMeta]:
         logger.info(
             "[provider] Lolicon request: count=%d, r18=%s, tags=%s, size=%s, proxy=%s, exclude_ai=%s",
             num,
@@ -111,16 +113,42 @@ class LoliconProvider(DownloadingSetuImageProvider):
             return []
 
         urls: list[str] = []
+        metas: list[ImageMeta] = []
         for item in data.get("data", []):
             # 根据 size 参数返回对应的 URL
             urls_obj = item.get("urls", {})
             img_url = urls_obj.get(self.image_size)
             if img_url:
                 urls.append(img_url)
+                metas.append(self._build_item_meta(item, img_url))
         urls = self._apply_proxy_to_urls(urls, self.proxy, "LoliconProvider")
+        # proxy 重写改变了 URL，元数据必须同步，否则 metas 与 payload.urls 对不上。
+        metas = [
+            replace(meta, url=new_url)
+            for meta, new_url in zip(metas, urls, strict=False)
+        ]
         logger.info(
-            "[provider] Lolicon response: requested=%d, returned=%d",
+            "[provider] Lolicon response: requested=%d, returned=%d, with_tags=%d",
             num,
-            len(urls),
+            len(metas),
+            sum(1 for meta in metas if meta.tags),
         )
-        return urls
+        return metas
+
+    def _build_item_meta(self, item: dict, img_url: str) -> ImageMeta:
+        """Convert one Lolicon result object into :class:`ImageMeta`."""
+        ai_type = item.get("aiType")
+        is_ai = ai_type == 2 if isinstance(ai_type, int) else None
+        return build_meta(
+            img_url,
+            title=item.get("title", ""),
+            author=item.get("author", ""),
+            uid=item.get("uid"),
+            pid=item.get("pid"),
+            pic_id=item.get("p"),
+            tags=item.get("tags", ()),
+            width=item.get("width", 0),
+            height=item.get("height", 0),
+            is_ai=is_ai,
+            provider="lolicon",
+        )

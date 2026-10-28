@@ -54,6 +54,9 @@ async def test_sexnyan_provider_uses_supported_filter_params(monkeypatch) -> Non
     assert ("keyword", "blue") in captured["params"]
     assert ("tag", "tag-a") in captured["params"]
     assert ("tag", "tag-b") in captured["params"]
-    assert urls == [
+    assert [meta.url for meta in urls] == [
         "https://pixiv-proxy.example.com/img-original/img/2026/01/01/00/00/00/1_p0.jpg"
     ]
+    # SexNyan 不返回作品元数据，说明区不应被渲染。
+    assert urls[0].has_details is False
+    assert urls[0].provider == "sexnyan"

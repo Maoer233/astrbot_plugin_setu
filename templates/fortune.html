@@ -2,218 +2,480 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8" />
-   <meta name="viewport" content="width=device-width, initial-scale=4.0">
+  <meta name="viewport" content="width=760" />
   <title>Fortune Card</title>
   <style>
-{{ fonts_css }}
+{{ fonts_css | safe }}
 
     :root {
       --primary-color: #d15a7c;
       --header-bg: #ffdae5;
       --bg-color: #f0f8ff;
+      --ink: #2f3542;
+      --muted: #7c848f;
+      --line: rgba(0, 0, 0, 0.07);
     }
 
-    .theme-red { --primary-color: #e74c3c; --header-bg: #ffcccc; --bg-color: #fff5f5; }
-    .theme-gold { --primary-color: #f39c12; --header-bg: #ffeaa7; --bg-color: #fffbf0; }
-    .theme-blue { --primary-color: #3498db; --header-bg: #bae7ff; --bg-color: #f0f9ff; }
-    .theme-purple { --primary-color: #9b59b6; --header-bg: #d9c3ff; --bg-color: #faf5ff; }
-    .theme-green { --primary-color: #27ae60; --header-bg: #b3ffe6; --bg-color: #f0fff5; }
-    .theme-gray { --primary-color: #636e72; --header-bg: #e0e0e0; --bg-color: #f8f9fa; }
+    .theme-red { --primary-color: #e74c3c; --header-bg: #ffd9d4; --bg-color: #fff6f4; }
+    .theme-gold { --primary-color: #e59f1b; --header-bg: #ffeaa7; --bg-color: #fffbf0; }
+    .theme-blue { --primary-color: #2f86d6; --header-bg: #d6ecff; --bg-color: #f4faff; }
+    .theme-purple { --primary-color: #9b59b6; --header-bg: #e6d6ff; --bg-color: #faf5ff; }
+    .theme-green { --primary-color: #27ae60; --header-bg: #ccf5e2; --bg-color: #f4fff9; }
+    .theme-gray { --primary-color: #636e72; --header-bg: #e4e7ea; --bg-color: #f8f9fa; }
+
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
       padding: 0;
       font-family: 'NotoSansSC-Regular', sans-serif;
+      color: var(--ink);
+      /* 固定宽度是整套模板的前提：t2i 走 full_page 截图，
+         宽度没有锚点时卡片高度会随字段线性增长成超长图。 */
+      width: 760px;
     }
 
     .card-container {
-      background: linear-gradient(180deg, var(--bg-color) 0%, #ffffff 100%);
+      width: 760px;
+      background: linear-gradient(180deg, var(--bg-color) 0%, #ffffff 62%);
       overflow: hidden;
-      box-shadow: 0 20px 80px rgba(0, 0, 0, 0.12);
     }
 
-    /* 顶部标题栏 */
+    /* ---------- 顶部 ---------- */
     .header {
-      background: linear-gradient(135deg, var(--header-bg) 0%, rgba(255, 255, 255, 0.5) 100%);
-      padding: 40px 48px;
+      background: linear-gradient(135deg, var(--header-bg) 0%, rgba(255, 255, 255, 0.6) 100%);
+      padding: 26px 32px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+      border-bottom: 1px solid var(--line);
     }
 
     .username {
-      font-size: 48px;
+      font-size: 30px;
       font-weight: bold;
       color: var(--primary-color);
       font-family: 'NotoSansSC-Bold', sans-serif;
-      text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
-      letter-spacing: 2px;
+      letter-spacing: 1px;
     }
 
-    .username span {
+    .username .suffix {
       font-weight: normal;
-      color: #777;
-      font-family: 'NotoSansSC-Regular', sans-serif;
-      letter-spacing: 1px;
-      opacity: 0.9;
+      font-size: 22px;
+      color: var(--muted);
+      margin-left: 8px;
+      letter-spacing: 0;
     }
+
+    .date-box { text-align: right; }
 
     .date {
-      background: rgba(255, 255, 255, 0.8);
-      padding: 12px 32px;
-      border-radius: 32px;
-      font-size: 32px;
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.9);
+      padding: 6px 18px;
+      border-radius: 20px;
+      font-size: 18px;
       color: #555;
-      font-family: 'NotoSansSC-Regular', sans-serif;
-      letter-spacing: 1px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
     }
 
-    /* 图片区域 */
+    .lunar {
+      margin-top: 6px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    /* ---------- 配图 ---------- */
     .image-section {
-      width: 100%;
-      background: #f0f0f0;
-      position: relative;
+      width: 760px;
+      background: #eef1f4;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
+    /* 竖版原图完整保留：按宽度缩放后高度自适应，不做裁切。 */
     .main-image {
-      width: 100%;
+      width: 760px;
       height: auto;
       display: block;
     }
 
     .image-placeholder {
-      width: 100%;
-      height: 100%;
+      width: 760px;
+      height: 240px;
       display: flex;
       align-items: center;
       justify-content: center;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      font-size: 56px;
+      color: #fff;
+      font-size: 40px;
       font-family: 'SSFangTangTi', 'NotoSansSC-Bold', sans-serif;
-      letter-spacing: 8px;
-      text-shadow: 2px 2px 6px rgba(0, 0, 0, 0.3);
+      letter-spacing: 6px;
     }
 
-    /* 运势内容区域 - 不再遮挡图片 */
-    .fortune-content {
-      background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);
-      margin: 36px 0;
-      border-radius: 0;
-      padding: 60px 48px;
-      box-shadow: none;
+    /* ---------- 主区 ---------- */
+    .body {
+      padding: 28px 32px 8px;
+    }
+
+    .verdict {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 6px 18px;
+      border-bottom: 1px dashed var(--line);
     }
 
     .fortune-title {
-      font-size: 140px;
+      font-size: 64px;
+      line-height: 1.1;
       color: var(--primary-color);
-      text-align: center;
-      margin-bottom: 24px;
       font-family: 'SSFangTangTi', 'NotoSansSC-Bold', sans-serif;
       font-weight: bold;
-      letter-spacing: 30px;
-      text-shadow: 4px 4px 8px rgba(0, 0, 0, 0.15);
-      -webkit-text-stroke: 2px rgba(255, 255, 255, 0.3);
+      letter-spacing: 8px;
     }
 
-    /* 星级 */
-    .stars-container {
+    .stars {
       display: flex;
-      justify-content: center;
-      gap: 16px;
-      margin-bottom: 48px;
+      gap: 6px;
+      align-items: center;
     }
 
     .star {
-      font-size: 64px;
+      font-size: 26px;
       color: #f1c40f;
-      text-shadow: 0 3px 6px rgba(241, 196, 15, 0.4);
-      transition: transform 0.2s;
+      line-height: 1;
     }
 
-    .star.empty {
-      color: #e0e0e0;
-      text-shadow: none;
+    .star.empty { color: #dfe4e8; }
+
+    .blessing {
+      margin-top: 16px;
+      font-size: 17px;
+      line-height: 1.75;
+      color: #3d4451;
+      padding-left: 14px;
+      border-left: 4px solid var(--primary-color);
     }
 
-    /* 描述区域 */
-    .desc-box {
-      background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
-      border-left: 8px solid var(--primary-color);
-      padding: 40px 48px;
-      border-radius: 0 24px 24px 0;
-      margin-top: 36px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+    /* ---------- 分运 ---------- */
+    .section-title {
+      font-size: 14px;
+      letter-spacing: 3px;
+      color: var(--muted);
+      margin: 26px 0 12px;
+      text-transform: uppercase;
     }
 
-    .desc-text {
-      font-size: 38px;
-      line-height: 1.9;
+    .dims {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 22px;
+    }
+
+    .dim {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .dim-label {
+      width: 42px;
+      font-size: 15px;
+      color: #4a5160;
+      flex: 0 0 auto;
+    }
+
+    .dim-bar {
+      flex: 1 1 auto;
+      height: 9px;
+      border-radius: 6px;
+      background: #eef1f4;
+      overflow: hidden;
+    }
+
+    .dim-fill {
+      height: 100%;
+      border-radius: 6px;
+    }
+
+    .dim-fill.great { background: #37b26a; }
+    .dim-fill.good { background: #66b3e8; }
+    .dim-fill.normal { background: #e8b23e; }
+    .dim-fill.low { background: #e07a6d; }
+
+    .dim-score {
+      width: 34px;
+      text-align: right;
+      font-size: 14px;
+      color: var(--muted);
+      font-family: 'NotoSansSC-Bold', sans-serif;
+      flex: 0 0 auto;
+    }
+
+    /* ---------- 宜忌 ---------- */
+    .yiji {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .yiji-col {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+
+    .yiji-head {
+      font-size: 15px;
+      font-weight: bold;
+      font-family: 'NotoSansSC-Bold', sans-serif;
+      margin-bottom: 8px;
+    }
+
+    .yiji-col.yi .yiji-head { color: #2f9e5f; }
+    .yiji-col.ji .yiji-head { color: #d9534f; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+    .chip {
+      font-size: 14px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: #f4f7f8;
+      color: #4a5160;
+    }
+
+    .yiji-col.yi .chip { background: #eaf7f0; color: #2f7d55; }
+    .yiji-col.ji .chip { background: #fdeeec; color: #b3413c; }
+
+    /* ---------- 幸运信息 ---------- */
+    /* 固定 5 列，保证最多 5 张卡片排成一整行、不换行。 */
+    .luckies {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+    }
+
+    .lucky {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 4px;
+      text-align: center;
+      min-width: 0;
+    }
+
+    .lucky-label {
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+
+    .lucky-value {
+      margin-top: 6px;
+      font-size: 16px;
+      font-weight: bold;
+      font-family: 'NotoSansSC-Bold', sans-serif;
       color: #333;
-      font-family: 'NotoSansSC-Regular', sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      line-height: 1.25;
+      word-break: break-all;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid rgba(0, 0, 0, 0.12);
+      display: inline-block;
+    }
+
+    .lucky-sub {
+      margin-top: 3px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* ---------- 签文 ---------- */
+    .sign {
+      background: #fffdf7;
+      border: 1px solid #f0e3c8;
+      border-radius: 12px;
+      padding: 16px 18px;
+    }
+
+    .sign-head {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .sign-grade {
+      font-size: 15px;
+      font-weight: bold;
+      font-family: 'NotoSansSC-Bold', sans-serif;
+      color: var(--primary-color);
+      background: rgba(0, 0, 0, 0.04);
+      padding: 2px 10px;
+      border-radius: 10px;
+    }
+
+    .sign-title {
+      font-size: 17px;
+      font-weight: bold;
+      font-family: 'NotoSansSC-Bold', sans-serif;
+      color: #3d4451;
+    }
+
+    .sign-type { font-size: 13px; color: var(--muted); }
+
+    .sign-poetry {
+      font-size: 16px;
+      line-height: 1.9;
+      color: #4a5160;
       letter-spacing: 1px;
     }
 
-    .extra-text {
-      margin-top: 24px;
-      font-size: 30px;
-      color: #666;
-      font-style: italic;
-      font-family: 'NotoSansSC-Regular', sans-serif;
-      letter-spacing: 0.5px;
+    .sign-extra {
+      margin-top: 6px;
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--muted);
     }
 
-    /* 底部品牌 */
     .footer {
       text-align: center;
-      padding: 36px;
-      font-size: 26px;
-      color: #999;
-      letter-spacing: 6px;
+      padding: 20px 0 24px;
+      font-size: 12px;
+      color: #aeb6bf;
+      letter-spacing: 4px;
       text-transform: uppercase;
-      font-family: 'NotoSansSC-Regular', sans-serif;
-    }
-
-    .footer-brand {
-      font-weight: bold;
-      color: #888;
-      font-family: 'NotoSansSC-Bold', sans-serif;
     }
   </style>
 </head>
 <body>
 <div class="card-container {{ theme_color }}">
-  <!-- 顶部标题栏 -->
   <div class="header">
-    <div class="username">{{ username }} <span>的运势</span></div>
-    <div class="date">{{ date_str }}</div>
+    <div class="username">{{ username }}<span class="suffix">的运势</span></div>
+    <div class="date-box">
+      <div class="date">{{ date_str }}</div>
+      {% if lunar_date %}
+      <div class="lunar">{{ lunar_date }}{% if ganzhi %} · {{ ganzhi }}{% endif %}{% if solar_term %} · {{ solar_term }}{% endif %}</div>
+      {% endif %}
+    </div>
   </div>
 
-  <!-- 图片区域 -->
   <div class="image-section">
     {% if image_base64 %}
-    <img class="main-image" src="data:image/jpeg;base64,{{ image_base64 }}" alt="Fortune Image" />
+    <img class="main-image" src="data:{{ image_mime }};base64,{{ image_base64 }}" alt="Fortune Image" />
     {% else %}
     <div class="image-placeholder">今日运势</div>
     {% endif %}
   </div>
 
-  <!-- 运势内容 -->
-  <div class="fortune-content">
-    <div class="fortune-title">{{ title }}</div>
-    <div class="stars-container">{{ stars_display }}</div>
-    <div class="desc-box">
-      <div class="desc-text">{{ description }}</div>
-      {% if extra_message %}<div class="extra-text">{{ extra_message }}</div>{% endif %}
+  <div class="body">
+    <div class="verdict">
+      <div class="fortune-title">{{ title }}</div>
+      <div class="stars">
+        {% for filled in star_flags %}<span class="star{% if not filled %} empty{% endif %}">★</span>{% endfor %}
+      </div>
     </div>
+
+    {% if blessing %}<div class="blessing">{{ blessing }}</div>{% endif %}
+
+    {% if dims %}
+    <div class="section-title">分运</div>
+    <div class="dims">
+      {% for dim in dims %}
+      <div class="dim">
+        <div class="dim-label">{{ dim.label }}</div>
+        <div class="dim-bar"><div class="dim-fill {{ dim.level }}" style="width: {{ dim.score }}%"></div></div>
+        <div class="dim-score">{{ dim.score }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if yi or ji %}
+    <div class="section-title">宜忌</div>
+    <div class="yiji">
+      {% if yi %}
+      <div class="yiji-col yi">
+        <div class="yiji-head">宜</div>
+        <div class="chips">{% for item in yi %}<span class="chip">{{ item }}</span>{% endfor %}</div>
+      </div>
+      {% endif %}
+      {% if ji %}
+      <div class="yiji-col ji">
+        <div class="yiji-head">忌</div>
+        <div class="chips">{% for item in ji %}<span class="chip">{{ item }}</span>{% endfor %}</div>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if lucky_color or lucky_number or lucky_direction or lucky_item or auspicious_hour %}
+    <div class="section-title">幸运指南</div>
+    <div class="luckies">
+      {% if lucky_color %}
+      <div class="lucky">
+        <div class="lucky-label">幸运色</div>
+        <div class="lucky-value">
+          {% if lucky_color_hex %}<span class="swatch" style="background: {{ lucky_color_hex }}"></span>{% endif %}{{ lucky_color }}
+        </div>
+      </div>
+      {% endif %}
+      {% if lucky_number %}
+      <div class="lucky">
+        <div class="lucky-label">幸运数字</div>
+        <div class="lucky-value">{{ lucky_number }}</div>
+      </div>
+      {% endif %}
+      {% if lucky_direction %}
+      <div class="lucky">
+        <div class="lucky-label">幸运方位</div>
+        <div class="lucky-value">{{ lucky_direction }}</div>
+      </div>
+      {% endif %}
+      {% if lucky_item %}
+      <div class="lucky">
+        <div class="lucky-label">幸运物</div>
+        <div class="lucky-value">{{ lucky_item }}</div>
+      </div>
+      {% endif %}
+      {% if auspicious_hour %}
+      <div class="lucky">
+        <div class="lucky-label">吉时</div>
+        <div class="lucky-value">{{ auspicious_hour }}</div>
+        <div class="lucky-sub">{{ auspicious_hour_window }}</div>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if sign_title %}
+    <div class="section-title">今日签</div>
+    <div class="sign">
+      <div class="sign-head">
+        {% if sign_grade %}<span class="sign-grade">{{ sign_grade }}</span>{% endif %}
+        <span class="sign-title">{{ sign_title }}</span>
+        {% if sign_type %}<span class="sign-type">{{ sign_type }}</span>{% endif %}
+      </div>
+      {% if sign_poetry %}<div class="sign-poetry">{{ sign_poetry }}</div>{% endif %}
+      {% if sign_meaning %}<div class="sign-extra">{{ sign_meaning }}</div>{% endif %}
+      {% if sign_explanation %}<div class="sign-extra">{{ sign_explanation }}</div>{% endif %}
+    </div>
+    {% endif %}
   </div>
 
-  <!-- 底部品牌 -->
-  <div class="footer">
-    <span class="footer-brand">Support By AstrBot</span>
-  </div>
+  <div class="footer">Support By AstrBot</div>
 </div>
 </body>
 </html>

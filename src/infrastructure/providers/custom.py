@@ -13,6 +13,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from ...domain import HTTP_TIMEOUT_SECONDS
+from ...domain.setu import ImageMeta, build_meta
 from ...shared import get_logger
 from .base import DownloadingSetuImageProvider
 
@@ -327,7 +328,7 @@ class CustomApiProvider(DownloadingSetuImageProvider):
         tags: list[str],
         r18: bool,
         exclude_ai: bool = True,
-    ) -> list[str]:
+    ) -> list[ImageMeta]:
         """从自定义 API 获取图片 URL 列表。"""
         try:
             url, body, original_host = await self._build_url(num, tags, r18, exclude_ai)
@@ -350,7 +351,11 @@ class CustomApiProvider(DownloadingSetuImageProvider):
                 data = resp.json()
 
                 urls = self._parse_response(data)
-                return urls[:num]  # 限制数量
+                # 自定义 API 的响应结构不可控，元数据只保留 URL；
+                # 需要标题/标签时应改用 lolicon/atri 源。
+                return [
+                    build_meta(item, provider="custom") for item in urls[:num]
+                ]
 
         except ValueError as e:
             logger.error("自定义 API URL 校验失败: %s", e)

@@ -1,0 +1,4 @@
+# 可选依赖：不安装也能正常运行，只是运势卡上的农历/干支区块自动隐藏。
+# 安装方式（在 AstrBot 的 venv 内执行）：
+#   pip install -r requirements-optional.txt
+lunar-python>=1.4.8

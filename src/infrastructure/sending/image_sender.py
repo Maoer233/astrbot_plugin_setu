@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import unquote, urlparse
 
 import astrbot.api.message_components as Comp
@@ -19,7 +19,12 @@ from ...shared.config import should_auto_revoke
 from ...shared.send_cache import get_send_cache, schedule_send_cache_cleanup
 from ..astrbot.config import get_config, get_plugin_context
 from ..astrbot.session_identity import get_event_session_identity
+from ..persistence import get_session_config_repo
 from .dto import SendAttemptResult, SendOptions
+from .formatters import (
+    DEFAULT_TAG_LIMIT,
+    format_multi_caption,
+)
 from .image_compressor import compress_image
 from .napcat_stream import upload_file_stream
 from .platform_capabilities import is_onebot_like_platform, supports_forward_messages
@@ -39,14 +44,7 @@ logger = get_logger()
 class ImageSender:
     """Send images with send-mode, stream-upload, and fallback strategies."""
 
-    def __init__(
-        self,
-        config: Any = None,
-        log: Any = None,
-        *,
-        content_type: Literal["setu", "fortune"] = "setu",
-    ) -> None:
-        self._content_type = content_type
+    def __init__(self, config: Any = None, log: Any = None) -> None:
         self._user_config = config
         self._log = log or logger
         self._html_renderer: Any = None
@@ -81,26 +79,40 @@ class ImageSender:
                 napcat_local_file_allowed_roots=(),
             )
 
-        identity = get_event_session_identity(event)
-        settings = SessionConfigService(config).resolve(identity.session_id)
-        send_mode = settings.send_mode
-        auto_revoke_scope = settings.auto_revoke_scope
-        r18_docx_mode = settings.r18_docx_mode if is_r18 else False
+        send_mode = config.send_mode
+        auto_revoke_scope = str(getattr(config, "auto_revoke_scope", "none") or "none")
+        r18_docx_mode = config.r18_docx_mode if is_r18 else False
+        session_label = "unknown"
+
+        try:
+            identity = get_event_session_identity(event)
+            session_label = identity.session_id
+            service = SessionConfigService(get_session_config_repo())
+            snapshot = await service.get_snapshot(
+                identity.session_id,
+                identity.session_type,
+                identity.display_name,
+            )
+            send_mode = str(snapshot.effective["setu.send_mode"])
+            auto_revoke_scope = str(
+                snapshot.effective["setu.auto_revoke_scope"] or "none"
+            )
+            if is_r18:
+                r18_docx_mode = bool(snapshot.effective["setu.r18_docx"])
+        except Exception as exc:
+            self._log.debug(
+                "[send] failed to apply session overrides: session=%s, error=%s",
+                session_label,
+                exc,
+            )
 
         html_card_strategy = config.html_card_strategy
         revoke_delay = config.auto_revoke_delay
-        is_fortune = self._content_type == "fortune"
-        if is_fortune:
-            send_mode = "image"
-            r18_docx_mode = False
-            auto_revoke_scope = "none"
         return SendOptions(
             send_mode=send_mode,
             use_html_card=html_card_strategy != "never",
             auto_revoke=(
-                config.auto_revoke_fortune_enabled and revoke_delay > 0
-                if is_fortune
-                else config.auto_revoke_setu_enabled
+                config.auto_revoke_setu_enabled
                 and revoke_delay > 0
                 and should_auto_revoke(auto_revoke_scope, is_r18)
             ),
@@ -162,37 +174,50 @@ class ImageSender:
 
         original_chain = self._build_image_chain(items)
         chain = original_chain
+        caption = self._build_caption_component(payload, options)
 
         if options.html_card_strategy == "always":
-            self._log.info(
-                "[send] html-card-only mode: session=%s, count=%d",
-                self._session_label(event),
-                payload.count,
-            )
-            html_result = await self._try_html_card_fallback(
-                event, chain, options, payload.r18
-            )
-            if not html_result.accepted:
-                fail_message = self._send_failed_message()
-                if fail_message:
-                    yield event.plain_result(fail_message)
+            if self._html_renderer is None:
+                # HTML 渲染器从未被注入（全仓无生产调用点），此模式下卡片必然失败。
+                # 与其静默报"发送失败"，不如按普通图片直发并只告警一次。
+                self._log.warning(
+                    "[send] html_card_strategy=always but no renderer is "
+                    "configured; falling back to direct image send: session=%s",
+                    self._session_label(event),
+                )
             else:
-                scheduled_count = await self._schedule_revoke_for_result(
-                    event, html_result, options
+                self._log.info(
+                    "[send] html-card-only mode: session=%s, count=%d",
+                    self._session_label(event),
+                    payload.count,
                 )
-                await self._send_post_delivery_messages(
-                    event, payload.count, options, payload.r18, scheduled_count
+                html_result = await self._try_html_card_fallback(
+                    event, chain, options, payload.r18
                 )
-                if html_result.pending:
-                    yield {
-                        "send_success": True,
-                        "image_count": payload.count,
-                        "send_pending": True,
-                    }
+                if not html_result.accepted:
+                    fail_message = self._send_failed_message()
+                    if fail_message:
+                        yield event.plain_result(fail_message)
                 else:
-                    yield {"send_success": True, "image_count": payload.count}
-            schedule_send_cache_cleanup()
-            return
+                    scheduled_count = await self._schedule_revoke_for_result(
+                        event, html_result, options
+                    )
+                    # 卡片把图烧成了新图，说明文字不会跟着走，必须补发。
+                    if caption is not None:
+                        await self._send_plain_text(event, caption.text)
+                    await self._send_post_delivery_messages(
+                        event, payload.count, options, payload.r18, scheduled_count
+                    )
+                    if html_result.pending:
+                        yield {
+                            "send_success": True,
+                            "image_count": payload.count,
+                            "send_pending": True,
+                        }
+                    else:
+                        yield {"send_success": True, "image_count": payload.count}
+                schedule_send_cache_cleanup()
+                return
 
         supports_forward = self._is_forward_supported(event)
         effective_mode = resolve_send_mode(
@@ -228,6 +253,9 @@ class ImageSender:
             batch_chain = [chain[i] for i in indices]
             original_batch_chain = [original_chain[i] for i in indices]
             batch_num = batch_idx + 1
+            # 说明文字只在最后一批带上：多批时图与说明仍同属一条消息，
+            # 不会每批发一次说明。
+            batch_caption = caption if batch_num == len(batch_indices) else None
             send_result = await self._send_one_batch(
                 event,
                 batch_chain,
@@ -236,6 +264,7 @@ class ImageSender:
                 options,
                 batch_num,
                 len(batch_indices),
+                caption=batch_caption,
             )
             if send_result.accepted:
                 all_failed = False
@@ -378,8 +407,11 @@ class ImageSender:
             compressed.append(Comp.Image.fromBytes(compressed_data))
         return compressed
 
-    async def _read_comp_bytes(self, comp: Comp.Image) -> bytes | None:
+    async def _read_comp_bytes(self, comp: Any) -> bytes | None:
         """Extract bytes from a Comp.Image, returning None if not file/base64."""
+        # 说明文字（Comp.Plain）可能随图片链传到这里，它不是图片也没有 .file 属性。
+        if not isinstance(comp, Comp.Image):
+            return None
         file_path = self._local_file_path(comp)
         if file_path:
             try:
@@ -420,6 +452,7 @@ class ImageSender:
         options: SendOptions,
         batch_num: int,
         total_batches: int,
+        caption: Comp.Plain | None = None,
     ) -> SendAttemptResult:
         """Send one batch with fallback logic (stream → HTML card)."""
         self._log.info(
@@ -430,6 +463,14 @@ class ImageSender:
             len(batch_chain),
             effective_mode,
         )
+
+        # 说明文字与图片同处一条消息链：直发与 forward 都支持混合组件，
+        # 失败重试路径（stream / 本地文件 / HTML 卡片）只处理图片部分，
+        # 因此 caption 只在这里拼接一次，避免在降级链路里丢失或重复。
+        send_chain: list[Any] = list(batch_chain)
+        if caption is not None:
+            send_chain.append(caption)
+
         send_result: SendAttemptResult | None = None
 
         if effective_mode != "forward" and options.napcat_local_file_mode == "always":
@@ -437,10 +478,13 @@ class ImageSender:
                 event, original_batch_chain, options
             )
             if send_result.accepted:
+                # 本地文件直传只处理图片，说明文字要单独补发，否则永远看不到。
+                if caption is not None:
+                    await self._send_plain_text(event, caption.text)
                 return send_result
 
         send_result = await self._send_chain(
-            event, batch_chain, effective_mode, options
+            event, send_chain, effective_mode, options
         )
 
         if (
@@ -459,6 +503,9 @@ class ImageSender:
             )
             if local_result.accepted:
                 send_result = local_result
+                # 本地直传只带图片，说明文字需补发（与 always 分支对齐）。
+                if caption is not None:
+                    await self._send_plain_text(event, caption.text)
 
         # forward 失败跳过 stream,直接 HTML 卡片(stream + forward 引用必崩)
         if (
@@ -477,8 +524,11 @@ class ImageSender:
             )
             if changed:
                 retry_options = self._without_stream_upload(options)
+                retry_chain: list[Any] = list(streamed)
+                if caption is not None:
+                    retry_chain.append(caption)
                 send_result = await self._send_chain(
-                    event, streamed, effective_mode, retry_options
+                    event, retry_chain, effective_mode, retry_options
                 )
 
         if not send_result.accepted and options.use_html_card:
@@ -492,6 +542,10 @@ class ImageSender:
                 self._context, self._html_renderer
             ).send_with_status(event, batch_chain, options.auto_revoke)
             send_result = html_result
+            # 卡片渲染器会把图烧成新图，说明文字必须补发，否则失败重试后
+            # 用户永远看不到标题/标签。
+            if send_result.accepted and caption is not None:
+                await self._send_plain_text(event, caption.text)
 
         return send_result
 
@@ -861,16 +915,22 @@ class ImageSender:
         is_r18: bool,
         scheduled_revoke_count: int,
     ) -> None:
-        """Send optional plain-text notices after at least one payload was accepted."""
-        if self._content_type == "fortune":
-            return
-        found_msg = self._format_found_message(
-            count,
-            scope=options.auto_revoke_scope,
-            r18=is_r18,
-        )
-        if found_msg:
-            await self._send_plain_text(event, found_msg)
+        """Send optional plain-text notices after at least one payload was accepted.
+
+        The ``found`` summary normally rides inside the image chain (see
+        :meth:`_build_caption_component`), which is what removed the historical
+        "one command, three messages" behaviour.  When that merging is disabled
+        the summary must still be delivered as its own message, exactly like the
+        pre-refactor behaviour.
+        """
+        if not self._merge_text_enabled():
+            found_msg = self._format_found_message(
+                count,
+                scope=options.auto_revoke_scope,
+                r18=is_r18,
+            )
+            if found_msg:
+                await self._send_plain_text(event, found_msg)
 
         if scheduled_revoke_count <= 0:
             return
@@ -884,6 +944,57 @@ class ImageSender:
         if revoke_msg:
             await self._send_plain_text(event, revoke_msg)
 
+    def _merge_text_enabled(self) -> bool:
+        """Whether captions should ride along inside the image message chain."""
+        config = self._config
+        if not config:
+            return True
+        return bool(getattr(config, "setu_merge_text_into_image", True))
+
+    def _tag_limit(self) -> int:
+        config = self._config
+        if not config:
+            return DEFAULT_TAG_LIMIT
+        value = getattr(config, "setu_caption_tag_limit", DEFAULT_TAG_LIMIT)
+        try:
+            return max(1, min(30, int(value)))
+        except (TypeError, ValueError):
+            return DEFAULT_TAG_LIMIT
+
+    def _build_caption_component(
+        self, payload: ImagePayload, options: SendOptions
+    ) -> Comp.Plain | None:
+        """Build the caption appended to the image chain, or None when disabled.
+
+        Layout follows the requested single-message behaviour:
+        image(s) followed by metadata lines and the found-count line.
+        """
+        if not self._merge_text_enabled():
+            return None
+
+        include_tags = True
+        config = self._config
+        if config is not None:
+            include_tags = bool(getattr(config, "setu_caption_include_tags", True))
+
+        parts: list[str] = []
+        caption = format_multi_caption(
+            payload.metas,
+            tag_limit=self._tag_limit(),
+            include_tags=include_tags,
+        )
+        if caption:
+            parts.append(caption)
+
+        found_template = None
+        if config is not None and getattr(config, "msg_found_enabled", True):
+            found_template = self._resolve_message("found", count=payload.count)
+        if found_template:
+            parts.append(str(found_template))
+
+        text = "\n".join(part for part in parts if part)
+        return Comp.Plain(text) if text else None
+
     def _format_found_message(
         self,
         count: int,
@@ -893,6 +1004,8 @@ class ImageSender:
     ) -> str | None:
         """Format found message with optional revoke delay."""
         config = self._config
+        if config and not getattr(config, "msg_found_enabled", True):
+            return None
         if config and hasattr(config, "format_found_message"):
             return config.format_found_message(count, revoke_delay, scope, r18)
         return self._resolve_message(

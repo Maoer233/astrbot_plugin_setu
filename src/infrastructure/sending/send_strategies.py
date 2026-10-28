@@ -436,6 +436,16 @@ class ForwardSendStrategy(SendStrategy):
                     content=[comp],
                 )
                 nodes.append(node)
+            elif isinstance(comp, Comp.Plain) and str(getattr(comp, "text", "")).strip():
+                # forward 只挑 Comp.Image 建节点会让说明文字整段消失；
+                # 合并转发模式下这是一条必现路径，必须单独包一个节点承载文本。
+                nodes.append(
+                    Comp.Node(
+                        uin=uin,
+                        name="色图",
+                        content=[comp],
+                    )
+                )
 
         build_end = time.monotonic()
         logger.debug(

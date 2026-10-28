@@ -55,7 +55,7 @@ class DoujinshiService:
         "Accept": "application/json",
         "User-Agent": (
             "astrbot-plugin-setu/2.2.0 "
-            "(+https://github.com/FlanChanXwO/astrbot_plugin_setu)"
+            "(+https://github.com/Maoer233/astrbot_plugin_setu)"
         ),
         "Sec-Fetch-Dest": "empty",
     }

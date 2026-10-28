@@ -7,23 +7,13 @@ Each section mirrors the _conf_schema.json structure for WebUI compatibility.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Any, ClassVar
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    RootModel,
-    field_validator,
-    model_validator,
-)
-
-from ...domain.setu.triggers import compile_trigger
-from .messages import MessagesConfig
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ImageSize(str, Enum):
-    """Valid image sizes for Lolicon APIs."""
+    """Valid image sizes for Lolicon/Atri APIs."""
 
     ORIGINAL = "original"
     REGULAR = "regular"
@@ -52,9 +42,18 @@ class ApiTypeStr(str, Enum):
     """API provider types."""
 
     LOLICON = "lolicon"
+    ATRI = "atri"
     SEXNYAN = "sexnyan"
     CUSTOM = "custom"
     ALL = "all"
+
+
+class MultiApiStrategyStr(str, Enum):
+    """Multi-API strategy types."""
+
+    ROUND_ROBIN = "round_robin"
+    RANDOM = "random"
+    FAILOVER = "failover"
 
 
 class SendModeStr(str, Enum):
@@ -134,7 +133,7 @@ class AccessControlModeStr(str, Enum):
 
 
 class ProviderConfig(BaseModel):
-    """Configuration for a single API provider (Lolicon or SexNyan)."""
+    """Configuration for a single API provider (Lolicon or Atri)."""
 
     image_size: ImageSize = ImageSize.REGULAR
     proxy: str = ""
@@ -188,49 +187,31 @@ class PlatformTransportConfig(BaseModel):
 
     template_key: str = Field("", alias="__template_key")
     stream_mode: NapcatStreamModeStr = NapcatStreamModeStr.FALLBACK
+    stream_chunk_kb: int = Field(default=64, ge=1)
     local_file_mode: NapcatLocalFileModeStr = NapcatLocalFileModeStr.DISABLED
     local_file_allowed_roots: list[str] = Field(default_factory=list)
-
-
-class TriggerTemplateConfig(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    template_key: Literal["setu", "doujinshi", "fortune"] = Field(
-        alias="__template_key"
-    )
-    phrase: str = ""
-
-    @model_validator(mode="after")
-    def validate_phrase(self) -> TriggerTemplateConfig:
-        compile_trigger(self.template_key, self.phrase)
-        return self
 
 
 class SetuGeneralConfig(BaseModel):
     """Setu general configuration."""
 
-    show_advanced: bool = False
     api_type: ApiTypeStr = ApiTypeStr.LOLICON
+    multi_api_strategy: MultiApiStrategyStr = MultiApiStrategyStr.ROUND_ROBIN
     content_mode: ContentModeStr = ContentModeStr.SFW
     max_count: int = Field(default=10, ge=1, le=10)
-    llm_tools_enabled: bool = True
-    natural_language_enabled: bool = True
-    trigger_templates: list[TriggerTemplateConfig] = Field(
-        default_factory=lambda: [
-            TriggerTemplateConfig(__template_key=kind)
-            for kind in ("setu", "doujinshi", "fortune")
-        ]
-    )
+    max_replenish_rounds: int = Field(default=3, ge=1, le=3)
     tag_alias_templates: list[TagAliasTemplateConfig] = Field(default_factory=list)
+    # 图片说明（标题/作者/PID/标签）与"找到 N 张"合并进同一条消息，
+    # 关闭后回退到"只发图 + 单独一条统计"的旧行为。
+    merge_text_into_image: bool = True
+    caption_include_tags: bool = True
+    caption_tag_limit: int = Field(default=10, ge=1, le=30)
 
 
 class DeliveryConfig(BaseModel):
     """消息发送与自动清理配置。"""
 
-    show_advanced: bool = False
     send_mode: SendModeStr = SendModeStr.AUTO
-    html_card_strategy: HtmlCardStrategyStr = HtmlCardStrategyStr.FALLBACK
-    doujinshi_enabled: bool = True
     doujinshi_send_mode: DoujinshiSendModeStr = DoujinshiSendModeStr.PDF
     doujinshi_max_page: int = Field(default=0, ge=0)
     r18_docx_mode: bool = True
@@ -242,114 +223,314 @@ class DeliveryConfig(BaseModel):
     platform_transports: list[PlatformTransportConfig] = Field(default_factory=list)
     # 兼容旧版平铺 NapCat 配置；新配置入口是 platform_transports 模板。
     napcat_stream_mode: NapcatStreamModeStr = NapcatStreamModeStr.FALLBACK
+    napcat_stream_chunk_kb: int = Field(default=64, ge=1)
     napcat_local_file_mode: NapcatLocalFileModeStr = NapcatLocalFileModeStr.DISABLED
     napcat_local_file_allowed_roots: list[str] = Field(default_factory=list)
     compress_enabled: bool = False
     compress_max_mb: int = Field(default=4, ge=1, le=30)
 
 
+class HtmlCardConfig(BaseModel):
+    """HTML card wrapping configuration."""
+
+    strategy: HtmlCardStrategyStr = HtmlCardStrategyStr.FALLBACK
+    mode: str = "single"
+    card_padding: int = Field(default=6, ge=0, le=30)
+    card_gap: int = Field(default=6, ge=0, le=30)
+
+
 class FortuneConfig(BaseModel):
     """Fortune (Today's Luck) configuration."""
 
-    show_advanced: bool = False
     enabled: bool = True
+    api_type: str = "inherit"
     tags: str = ""
     content_mode: ContentModeStr = ContentModeStr.SFW
     allow_user_refresh: bool = False
     auto_refresh: bool = True
+    # 变更 master_key 会让所有人在同一天重新洗牌，可用来做节日活动。
+    master_key: str = "astrbot-setu"
+    enable_yi_ji: bool = True
+    enable_lucky: bool = True
+    enable_dims: bool = True
+    enable_hour: bool = True
+    enable_blessing: bool = True
+    enable_sign: bool = True
+    enable_lunar: bool = True
+    sign_count: int = Field(default=1, ge=1, le=5)
 
 
-class AccessControlTemplate(BaseModel):
-    """按功能配置完整 SID 访问规则。"""
+class CacheConfig(BaseModel):
+    """Disk cache used before adapter-level image sending."""
 
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-    template_key: Literal["setu", "fortune"] = Field(alias="__template_key")
-    mode: AccessControlModeStr = AccessControlModeStr.NONE
-    blocked_sids: list[str] = Field(default_factory=list)
-    whitelist_sids: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    ttl_hours: int = Field(default=2, ge=1, le=168)
+    max_items: int = Field(default=200, ge=1, le=1000)
+    cleanup_on_start: bool = True
 
-    @field_validator("blocked_sids", "whitelist_sids")
+
+class MessagesFetchingConfig(BaseModel):
+    """Fetching message configuration.
+
+    默认关闭：图片与说明已合并为一条消息，再补一条"正在获取"会让单次
+    指令产生额外消息。部分平台取图较慢时可在配置里重新开启。
+    """
+
+    enabled: bool = False
+    text: str = "正在获取图片，请稍候..."
+
+
+class MessagesFoundConfig(BaseModel):
+    """Found message configuration."""
+
+    enabled: bool = True
+    text: str = "找到 {count} 张符合要求的图片~"
+
+
+class MessagesSendFailedConfig(BaseModel):
+    """Send failed message configuration."""
+
+    enabled: bool = True
+    text: str = "图片发送失败，请稍后再试。"
+
+
+class MessageTextConfig(BaseModel):
+    """Generic user-facing message configuration."""
+
+    enabled: bool = True
+    text: str = ""
+
+
+class MessageOverrideConfig(BaseModel):
+    """Optional user-facing message override from template_list."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    template_key: str = Field("", alias="__template_key")
+    message_key: str = "fetching"
+    enabled: bool = True
+    text: str = "正在获取图片，请稍候..."
+
+
+class MessagesConfig(BaseModel):
+    """User-facing message configuration."""
+
+    _DEFAULT_TEXTS: ClassVar[dict[str, str]] = {
+        "fetching": "正在获取图片，请稍候...",
+        "found": "找到 {count} 张符合要求的图片~",
+        "send_failed": "图片发送失败，请稍后再试。",
+        "revoke_scheduled": "已设置自动撤回，将在 {revoke_delay} 秒后撤回。",
+        "rate_limited": "你有一个请求正在处理中，请稍后再试~",
+        "config_not_loaded": "配置未加载",
+        "error_invalid_request": "请求参数无效",
+        "error_internal_server": "服务器内部错误",
+        "invalid_count": "数量解析失败，图片数量必须在{min_count}-{max_count}之间",
+        "max_count_exceeded": "一次最多只能获取{max_count}张哦~",
+        "count_out_of_range": "图片数量必须在{min_count}-{max_count}之间哦~",
+        "fetch_timeout": "获取图片超时，网络可能不稳定，请稍后再试。",
+        "fetch_failed": "获取图片失败，请稍后再试",
+        "doujinshi_fetching": "正在获取随机本子并生成文件，请稍候...",
+        "doujinshi_failed": "随机本子获取或文件生成失败，请稍后再试。",
+        "no_result": "未找到{tags_info}符合要求的图片~",
+        "empty_payload": "运气不好，一张图都没拿到...",
+        "r18_docx_failed": "R18 Docx 封装失败，请稍后再试或联系管理员。",
+        "fortune_group_only": "此命令仅支持群聊",
+        "fortune_generating": "正在为你生成今日运势，正在获取今日配图，请稍等片刻~",
+        "fortune_missing_user_id": "请指定用户ID",
+        "fortune_get_failed": "获取运势失败: {error}",
+        "fortune_refresh_failed": "刷新运势失败: {error}",
+        "fortune_refresh_group_failed": "刷新群运势失败: {error}",
+        "fortune_refresh_all_failed": "刷新全局运势失败: {error}",
+        "fortune_refresh_group_done": "已刷新本群 {count} 位用户的今日运势",
+        "fortune_refresh_all_done": "已刷新全局 {count} 位用户的今日运势",
+        "fortune_enabled_group_done": "运势功能已开启",
+        "fortune_disabled_group_done": "运势功能已关闭",
+        "fortune_block_user_done": "用户 {user_id} 已添加到运势黑名单",
+        "fortune_unblock_user_done": "用户 {user_id} 已从运势黑名单移除",
+        "fortune_trust_user_done": "用户 {user_id} 已添加到运势白名单",
+        "fortune_untrust_user_done": "用户 {user_id} 已从运势白名单移除",
+    }
+
+    @model_validator(mode="before")
     @classmethod
-    def normalize_ids(cls, values: list[str]) -> list[str]:
-        normalized = list(dict.fromkeys(value.strip() for value in values))
-        for value in normalized:
-            parts = value.split(":", 2)
-            if len(parts) != 3 or not all(parts):
-                raise ValueError(f"需要完整 SID（平台:消息类型:会话ID）：{value!r}")
-        return normalized
+    def fill_missing_message_text(cls, data: Any) -> Any:
+        """Fill default text when a message object omits the text field."""
+        if not isinstance(data, dict):
+            return data
+        patched = dict(data)
+        for key, default_text in cls._DEFAULT_TEXTS.items():
+            value = patched.get(key)
+            if isinstance(value, dict) and "text" not in value:
+                patched[key] = {**value, "text": default_text}
+        return patched
 
-    @model_validator(mode="after")
-    def reject_conflicting_lists(self) -> AccessControlTemplate:
-        if set(self.blocked_sids) & set(self.whitelist_sids):
-            raise ValueError(f"{self.template_key} 黑白名单不能包含相同 SID")
-        return self
+    message_overrides: list[MessageOverrideConfig] = Field(default_factory=list)
+    fetching: MessagesFetchingConfig = Field(default_factory=MessagesFetchingConfig)
+    found: MessagesFoundConfig = Field(default_factory=MessagesFoundConfig)
+    send_failed: MessagesSendFailedConfig = Field(
+        default_factory=MessagesSendFailedConfig
+    )
+    revoke_scheduled: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="已设置自动撤回，将在 {revoke_delay} 秒后撤回。"
+        )
+    )
+    rate_limited: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="你有一个请求正在处理中，请稍后再试~"
+        )
+    )
+    config_not_loaded: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="配置未加载")
+    )
+    error_invalid_request: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="请求参数无效")
+    )
+    error_internal_server: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="服务器内部错误")
+    )
+    invalid_count: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="数量解析失败，图片数量必须在{min_count}-{max_count}之间"
+        )
+    )
+    max_count_exceeded: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="一次最多只能获取{max_count}张哦~"
+        )
+    )
+    count_out_of_range: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="图片数量必须在{min_count}-{max_count}之间哦~"
+        )
+    )
+    fetch_timeout: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="获取图片超时，网络可能不稳定，请稍后再试。"
+        )
+    )
+    fetch_failed: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="获取图片失败，请稍后再试")
+    )
+    doujinshi_fetching: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="正在获取随机本子并生成文件，请稍候..."
+        )
+    )
+    doujinshi_failed: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="随机本子获取或文件生成失败，请稍后再试。"
+        )
+    )
+    no_result: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="未找到{tags_info}符合要求的图片~"
+        )
+    )
+    empty_payload: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="运气不好，一张图都没拿到...")
+    )
+    r18_docx_failed: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="R18 Docx 封装失败，请稍后再试或联系管理员。"
+        )
+    )
+    fortune_group_only: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="此命令仅支持群聊")
+    )
+    fortune_generating: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="正在为你生成今日运势，正在获取今日配图，请稍等片刻~"
+        )
+    )
+    fortune_missing_user_id: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="请指定用户ID")
+    )
+    fortune_get_failed: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="获取运势失败: {error}")
+    )
+    fortune_refresh_failed: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="刷新运势失败: {error}")
+    )
+    fortune_refresh_group_failed: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="刷新群运势失败: {error}")
+    )
+    fortune_refresh_all_failed: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="刷新全局运势失败: {error}")
+    )
+    fortune_refresh_group_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="已刷新本群 {count} 位用户的今日运势"
+        )
+    )
+    fortune_refresh_all_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="已刷新全局 {count} 位用户的今日运势"
+        )
+    )
+    fortune_enabled_group_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="运势功能已开启")
+    )
+    fortune_disabled_group_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(text="运势功能已关闭")
+    )
+    fortune_block_user_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="用户 {user_id} 已添加到运势黑名单"
+        )
+    )
+    fortune_unblock_user_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="用户 {user_id} 已从运势黑名单移除"
+        )
+    )
+    fortune_trust_user_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="用户 {user_id} 已添加到运势白名单"
+        )
+    )
+    fortune_untrust_user_done: MessageTextConfig = Field(
+        default_factory=lambda: MessageTextConfig(
+            text="用户 {user_id} 已从运势白名单移除"
+        )
+    )
 
 
-class SafetyConfig(RootModel[list[AccessControlTemplate]]):
-    """未添加模板的功能不限制；每种功能只接受一条规则。"""
+class SafetyConfig(BaseModel):
+    """Safety and access control configuration."""
 
-    root: list[AccessControlTemplate] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def reject_duplicate_rules(self) -> SafetyConfig:
-        keys = [item.template_key for item in self.root]
-        if len(keys) != len(set(keys)):
-            raise ValueError("同一访问控制模板不能重复添加")
-        return self
-
-
-class SessionTemplateBase(BaseModel):
-    """会话标识必须与 AstrBot unified_msg_origin 精确匹配。"""
-
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-    session_id: str
-
-    @field_validator("session_id")
-    @classmethod
-    def validate_session_id(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("session_id 不能为空")
-        return value
+    setu_user_access_control_mode: AccessControlModeStr = AccessControlModeStr.NONE
+    setu_group_access_control_mode: AccessControlModeStr = AccessControlModeStr.NONE
+    setu_blocked_users: list[str] = Field(default_factory=list)
+    setu_whitelist_users: list[str] = Field(default_factory=list)
+    setu_blocked_groups: list[str] = Field(default_factory=list)
+    setu_whitelist_groups: list[str] = Field(default_factory=list)
+    fortune_user_access_control_mode: AccessControlModeStr = AccessControlModeStr.NONE
+    fortune_group_access_control_mode: AccessControlModeStr = AccessControlModeStr.NONE
+    fortune_blocked_users: list[str] = Field(default_factory=list)
+    fortune_whitelist_users: list[str] = Field(default_factory=list)
+    fortune_blocked_groups: list[str] = Field(default_factory=list)
+    fortune_whitelist_groups: list[str] = Field(default_factory=list)
 
 
-class SetuSessionTemplate(SessionTemplateBase):
-    template_key: Literal["setu"] = Field("setu", alias="__template_key")
-    content_mode: Literal["inherit", "sfw", "r18", "mix"] = "inherit"
-    send_mode: Literal["inherit", "image", "forward", "auto"] = "inherit"
-    r18_docx_mode: Literal["inherit", "true", "false"] = "inherit"
-    auto_revoke_scope: Literal["inherit", "none", "sfw", "r18", "all"] = "inherit"
+class SessionTemplateItem(BaseModel):
+    """Session configuration template item."""
+
+    session_id: str = ""
+    session_type: str = "group"
+    content_mode: str = ""
+    r18_docx_mode: str = ""
+    auto_revoke_scope: str = ""
+    send_mode: str = ""
 
 
-class FortuneSessionTemplate(SessionTemplateBase):
-    template_key: Literal["fortune"] = Field("fortune", alias="__template_key")
-    content_mode: Literal["inherit", "sfw", "r18", "mix"] = "inherit"
-    override_tags: bool = False
+class FortuneSessionTemplateItem(BaseModel):
+    """Fortune session configuration template item."""
+
+    session_id: str = ""
+    session_type: str = "group"
     tags: str = ""
-
-
-SessionTemplate = Annotated[
-    SetuSessionTemplate | FortuneSessionTemplate, Field(discriminator="template_key")
-]
-
-
-class SessionOverridesConfig(BaseModel):
-    session_configs: list[SessionTemplate] = Field(default_factory=list)
-
-    @field_validator("session_configs")
-    @classmethod
-    def reject_duplicate_sessions(
-        cls, values: list[SessionTemplate]
-    ) -> list[SessionTemplate]:
-        seen = set()
-        for item in values:
-            key = (item.session_id, item.template_key)
-            if key in seen:
-                raise ValueError(
-                    f"会话模板重复：{item.session_id} ({item.template_key})"
-                )
-            seen.add(key)
-        return values
+    content_mode: str = ""
 
 
 class ApiSectionConfig(BaseModel):
@@ -359,7 +540,7 @@ class ApiSectionConfig(BaseModel):
     custom_api_configs: list[CustomApiConfig] = Field(default_factory=list)
 
 
-class SetuPluginConfig(SessionOverridesConfig):
+class SetuPluginConfig(BaseModel):
     """Root Pydantic model for Setu plugin configuration.
 
     This replaces the ConfigBase + mixin chain with a single validated model.
@@ -371,15 +552,49 @@ class SetuPluginConfig(SessionOverridesConfig):
 
     setu_general: SetuGeneralConfig = Field(default_factory=SetuGeneralConfig)
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
+    html_card: HtmlCardConfig = Field(default_factory=HtmlCardConfig)
     fortune: FortuneConfig = Field(default_factory=FortuneConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
     api: ApiSectionConfig = Field(default_factory=ApiSectionConfig)
+    messages: MessagesConfig = Field(default_factory=MessagesConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    session_configs: list[SessionTemplateItem] = Field(default_factory=list)
+    fortune_session_configs: list[FortuneSessionTemplateItem] = Field(
+        default_factory=list
+    )
+
+    @field_validator("session_configs")
+    @classmethod
+    def validate_session_configs(
+        cls, v: list[SessionTemplateItem]
+    ) -> list[SessionTemplateItem]:
+        """Validate session configurations."""
+        for item in v:
+            if item.session_type not in ("group", "private"):
+                raise ValueError(f"Invalid session_type: {item.session_type}")
+        return v
+
+    @field_validator("fortune_session_configs")
+    @classmethod
+    def validate_fortune_session_configs(
+        cls, v: list[FortuneSessionTemplateItem]
+    ) -> list[FortuneSessionTemplateItem]:
+        """Validate fortune session configurations."""
+        for item in v:
+            if item.session_type not in ("group", "private"):
+                raise ValueError(f"Invalid session_type: {item.session_type}")
+        return v
 
     # Convenience properties for backward compatibility
     @property
     def api_type(self) -> str:
         """Get API type."""
         return self.setu_general.api_type.value
+
+    @property
+    def multi_api_strategy(self) -> str:
+        """Get multi-API strategy."""
+        return self.setu_general.multi_api_strategy.value
 
     @property
     def content_mode(self) -> str:
@@ -394,7 +609,7 @@ class SetuPluginConfig(SessionOverridesConfig):
     @property
     def max_replenish_rounds(self) -> int:
         """Get max replenish rounds."""
-        return 3
+        return self.setu_general.max_replenish_rounds
 
     @property
     def tag_alias(self) -> str:
@@ -475,7 +690,10 @@ class SetuPluginConfig(SessionOverridesConfig):
     @property
     def napcat_stream_chunk_kb(self) -> int:
         """Get NapCat stream upload chunk size in KiB."""
-        return 64
+        transport = self._platform_transport("napcat")
+        if transport is not None:
+            return transport.stream_chunk_kb
+        return self.delivery.napcat_stream_chunk_kb
 
     @property
     def napcat_local_file_mode(self) -> str:
@@ -506,42 +724,43 @@ class SetuPluginConfig(SessionOverridesConfig):
     @property
     def html_card_strategy(self) -> str:
         """Get HTML card strategy."""
-        return self.delivery.html_card_strategy.value
+        return self.html_card.strategy.value
 
     @property
     def html_card_padding(self) -> int:
         """Get HTML card padding."""
-        return 6
+        return self.html_card.card_padding
 
     @property
     def html_card_gap(self) -> int:
         """Get HTML card gap."""
-        return 6
+        return self.html_card.card_gap
 
     @property
     def cache_enabled(self) -> bool:
         """Get cache enabled."""
-        return True
+        return self.cache.enabled
 
     @property
     def cache_ttl_hours(self) -> int:
         """Get cache TTL hours."""
-        return 2
+        return self.cache.ttl_hours
 
     @property
     def cache_max_items(self) -> int:
         """Get cache max items."""
-        return 200
+        return self.cache.max_items
 
     @property
     def cache_cleanup_on_start(self) -> bool:
         """Get cache cleanup on start."""
-        return True
+        return self.cache.cleanup_on_start
 
     @property
     def exclude_ai(self) -> bool:
         """Get exclude AI."""
-        return self._provider_config("lolicon").exclude_ai
+        provider = "atri" if self.api_type == "atri" else "lolicon"
+        return self._provider_config(provider).exclude_ai
 
     @property
     def image_size(self) -> str:
@@ -570,6 +789,37 @@ class SetuPluginConfig(SessionOverridesConfig):
         return self._provider_config("lolicon").keyword
 
     @property
+    def atri_image_size(self) -> str:
+        """Get Atri image size."""
+        return self._provider_config("atri").image_size.value
+
+    @property
+    def atri_proxy(self) -> str:
+        """Get Atri proxy."""
+        return self._provider_config("atri").proxy
+
+    @property
+    def atri_aspect_ratio(self) -> str:
+        """Get Atri aspect ratio."""
+        config = self._provider_config("atri")
+        return config.aspect_ratio.value if config.aspect_ratio else ""
+
+    @property
+    def atri_uid(self) -> list[int]:
+        """Get Atri UID list."""
+        return self._provider_config("atri").uid
+
+    @property
+    def atri_keyword(self) -> str:
+        """Get Atri keyword."""
+        return self._provider_config("atri").keyword
+
+    @property
+    def atri_exclude_ai(self) -> bool:
+        """Get Atri exclude AI."""
+        return self._provider_config("atri").exclude_ai
+
+    @property
     def sexnyan_proxy(self) -> str:
         """Get SexNyan proxy."""
         return self._provider_config("sexnyan").proxy
@@ -583,6 +833,11 @@ class SetuPluginConfig(SessionOverridesConfig):
     def sexnyan_keyword(self) -> str:
         """Get SexNyan keyword."""
         return self._provider_config("sexnyan").keyword
+
+    @property
+    def fortune_api_type(self) -> str:
+        """Get fortune API type."""
+        return self.fortune.api_type
 
     @property
     def custom_api(self) -> dict[str, Any]:
@@ -638,9 +893,118 @@ class SetuPluginConfig(SessionOverridesConfig):
                 return item
         return None
 
+    @property
+    def setu_merge_text_into_image(self) -> bool:
+        """Whether captions are merged into the image message chain."""
+        return bool(getattr(self.setu_general, "merge_text_into_image", True))
+
+    @property
+    def setu_caption_include_tags(self) -> bool:
+        """Whether the caption lists image tags."""
+        return bool(getattr(self.setu_general, "caption_include_tags", True))
+
+    @property
+    def setu_caption_tag_limit(self) -> int:
+        """Maximum number of tags shown in a caption."""
+        value = getattr(self.setu_general, "caption_tag_limit", 10)
+        try:
+            return max(1, min(30, int(value)))
+        except (TypeError, ValueError):
+            return 10
+
+    @property
+    def msg_fetching_enabled(self) -> bool:
+        """Get fetching message enabled."""
+        return self.messages.fetching.enabled
+
+    @property
+    def msg_fetching_text(self) -> str:
+        """Get fetching message text."""
+        return self.messages.fetching.text
+
+    @property
+    def msg_found_enabled(self) -> bool:
+        """Get found message enabled."""
+        return self.messages.found.enabled
+
+    @property
+    def msg_found_text(self) -> str:
+        """Get found message text."""
+        return self.messages.found.text
+
+    @property
+    def msg_send_failed_text(self) -> str:
+        """Get send failed message text."""
+        return self.messages.send_failed.text
+
+    @property
+    def msg_send_failed_enabled(self) -> bool:
+        """Get send failed message enabled."""
+        return self.messages.send_failed.enabled
+
     def resolve_message(self, key: str, **kwargs: Any) -> str | None:
-        """Resolve a built-in message with placeholder substitution."""
-        return MessagesConfig.resolve_message(key, **kwargs)
+        """Resolve configured message text by key with placeholder substitution."""
+        override = self._message_override(key)
+        if override is not None:
+            if not override.enabled:
+                return None
+            text = override.text
+        elif key == "fetching":
+            if not self.msg_fetching_enabled:
+                return None
+            text = self.msg_fetching_text
+        elif key == "found":
+            if not self.msg_found_enabled:
+                return None
+            text = self.msg_found_text
+        elif key == "send_failed":
+            if not self.msg_send_failed_enabled:
+                return None
+            text = self.msg_send_failed_text
+        else:
+            # Web API error keys are exposed as dotted names while Pydantic
+            # fields keep Python identifiers.
+            item = getattr(self.messages, key, None) or getattr(
+                self.messages, key.replace(".", "_"), None
+            )
+            if not item or not getattr(item, "enabled", True):
+                return None
+            text = str(getattr(item, "text", "") or "")
+
+        result = str(text)
+        for k, v in kwargs.items():
+            result = result.replace(f"{{{k}}}", str(v))
+        if not result:
+            return None
+        return result
+
+    def _message_override(self, key: str) -> MessageOverrideConfig | None:
+        """Return a matching message override, if configured."""
+        for item in self.messages.message_overrides:
+            override_key = item.message_key or item.template_key
+            if override_key == key:
+                return item
+        return None
+
+    @property
+    def setu_user_access_control_mode(self) -> str:
+        """Get Setu user access control mode."""
+        return self.safety.setu_user_access_control_mode.value
+
+    @property
+    def setu_group_access_control_mode(self) -> str:
+        """Get Setu group access control mode."""
+        return self.safety.setu_group_access_control_mode.value
+
+    @property
+    def fortune_user_access_control_mode(self) -> str:
+        """Get Fortune user access control mode."""
+        return self.safety.fortune_user_access_control_mode.value
+
+    @property
+    def fortune_group_access_control_mode(self) -> str:
+        """Get Fortune group access control mode."""
+        return self.safety.fortune_group_access_control_mode.value
 
     def format_found_message(
         self,
@@ -661,3 +1025,10 @@ class SetuPluginConfig(SessionOverridesConfig):
             )
             or ""
         )
+
+    def get_effective_fortune_api_type(self) -> str:
+        """Get effective fortune API type."""
+        fortune_api = self.fortune.api_type
+        if fortune_api == "inherit":
+            return self.api_type
+        return fortune_api

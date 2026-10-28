@@ -6,6 +6,7 @@ from typing import Any
 
 from ...application.ports import SetuImageProvider
 from ...shared import get_logger
+from .atri import AtriProvider
 from .custom import CustomApiProvider
 from .lolicon import LoliconProvider
 from .multi import MultiApiProvider
@@ -16,11 +17,12 @@ logger = get_logger()
 # 提供商注册表
 PROVIDERS: dict[str, type[SetuImageProvider]] = {
     "lolicon": LoliconProvider,
+    "atri": AtriProvider,
     "sexnyan": SexNyanRunProvider,
 }
 
 # 多API策略下的内置提供商列表
-BUILTIN_PROVIDERS = ["lolicon", "sexnyan"]
+BUILTIN_PROVIDERS = ["lolicon", "atri", "sexnyan"]
 
 # ==================== Singleton Pattern ====================
 
@@ -48,17 +50,19 @@ def init_provider(
     custom_api_configs: list[dict[str, Any]] | None = None,
     multi_api_strategy: str = "round_robin",
     lolicon_config: dict[str, Any] | None = None,
+    atri_config: dict[str, Any] | None = None,
     sexnyan_config: dict[str, Any] | None = None,
 ) -> SetuImageProvider:
     """Initialize provider singleton.
 
     Args:
-        api_type: Provider type ('lolicon', 'sexnyan', 'custom', 'all').
+        api_type: Provider type ('lolicon', 'atri', 'sexnyan', 'custom', 'all').
         custom_config: Custom API config for 'custom' type.
         parser_config: Parser config for 'custom' type.
         custom_api_configs: Custom API configs list (template_list format).
         multi_api_strategy: Multi-API strategy ('round_robin', 'random', 'failover').
         lolicon_config: Lolicon provider config.
+        atri_config: Atri provider config.
         sexnyan_config: SexNyan provider config.
 
     Returns:
@@ -72,6 +76,7 @@ def init_provider(
         custom_api_configs=custom_api_configs,
         multi_api_strategy=multi_api_strategy,
         lolicon_config=lolicon_config,
+        atri_config=atri_config,
         sexnyan_config=sexnyan_config,
     )
     return _provider
@@ -82,13 +87,20 @@ def init_provider_from_config(config: Any) -> SetuImageProvider:
     provider = init_provider(
         api_type=(getattr(config, "api_type", None) or "lolicon"),
         custom_api_configs=getattr(config, "custom_api_configs", None) or None,
-        multi_api_strategy="round_robin",
+        multi_api_strategy=getattr(config, "multi_api_strategy", "round_robin"),
         lolicon_config={
             "image_size": getattr(config, "image_size", None) or "original",
             "proxy": getattr(config, "proxy", None) or "",
             "aspect_ratio": getattr(config, "aspect_ratio", None) or "",
             "uid": getattr(config, "uid", None) or [],
             "keyword": getattr(config, "keyword", None) or "",
+        },
+        atri_config={
+            "image_size": getattr(config, "atri_image_size", None) or "original",
+            "proxy": getattr(config, "atri_proxy", None) or "",
+            "aspect_ratio": getattr(config, "atri_aspect_ratio", None) or "",
+            "uid": getattr(config, "atri_uid", None) or [],
+            "keyword": getattr(config, "atri_keyword", None) or "",
         },
         sexnyan_config={
             "proxy": getattr(config, "sexnyan_proxy", None) or "",
@@ -97,9 +109,10 @@ def init_provider_from_config(config: Any) -> SetuImageProvider:
         },
     )
     logger.info(
-        "[provider] initialized from config: api_type=%s, lolicon_proxy=%s",
+        "[provider] initialized from config: api_type=%s, lolicon_proxy=%s, atri_proxy=%s",
         getattr(config, "api_type", None) or "lolicon",
         getattr(config, "proxy", None) or "-",
+        getattr(config, "atri_proxy", None) or "-",
     )
     return provider
 
@@ -117,17 +130,19 @@ def _create_provider(
     custom_api_configs: list[dict[str, Any]] | None = None,
     multi_api_strategy: str = "round_robin",
     lolicon_config: dict[str, Any] | None = None,
+    atri_config: dict[str, Any] | None = None,
     sexnyan_config: dict[str, Any] | None = None,
 ) -> SetuImageProvider | MultiApiProvider:
     """根据类型名称获取提供商实例。
 
     参数:
-        api_type: 提供商类型（'lolicon'、'sexnyan'、'custom' 或 'all'）。
+        api_type: 提供商类型（'lolicon'、'atri'、'sexnyan'、'custom' 或 'all'）。
         custom_config: 自定义 API 配置（当 api_type 为 custom 时使用）。
         parser_config: API 响应解析配置（当 api_type 为 custom 时使用）。
         custom_api_configs: 自定义 API 配置列表（template_list 格式）。
         multi_api_strategy: 多 API 策略（'round_robin'、'random'、'failover'）。
         lolicon_config: Lolicon 专属配置参数。
+        atri_config: Atri 专属配置参数。
         sexnyan_config: SexNyan 专属配置参数。
 
     返回:
@@ -139,6 +154,8 @@ def _create_provider(
         for name in BUILTIN_PROVIDERS:
             if name == "lolicon" and lolicon_config:
                 provider = LoliconProvider(**lolicon_config)
+            elif name == "atri" and atri_config:
+                provider = AtriProvider(**atri_config)
             elif name == "sexnyan" and sexnyan_config:
                 provider = SexNyanRunProvider(**sexnyan_config)
             else:
@@ -199,6 +216,8 @@ def _create_provider(
     # 创建实例
     if api_type == "lolicon" and lolicon_config:
         return provider_cls(**lolicon_config)
+    if api_type == "atri" and atri_config:
+        return provider_cls(**atri_config)
     if api_type == "sexnyan" and sexnyan_config:
         return provider_cls(**sexnyan_config)
     return provider_cls()
@@ -208,6 +227,7 @@ __all__ = [
     "SetuImageProvider",
     "MultiApiProvider",
     "LoliconProvider",
+    "AtriProvider",
     "SexNyanRunProvider",
     "CustomApiProvider",
     "get_provider",

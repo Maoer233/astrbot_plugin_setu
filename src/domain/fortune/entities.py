@@ -5,8 +5,11 @@ Extracts domain logic from FortuneCore into proper DDD entities.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
+from typing import Any
+
+from .detail_dto import FortuneDetail
 
 # Default weights array (corresponding to 0-7 stars)
 DEFAULT_WEIGHTS = [0.1, 0.15, 0.2, 0.25, 0.15, 0.12, 0.07, 0.005]
@@ -79,7 +82,8 @@ class FortuneRecord:
     img_url: str | None
     last_view_date: str
     group_id: str | None = None
-    session_id: str | None = None
+    nonce: int = 0
+    detail: FortuneDetail | None = None
 
     @property
     def max_stars(self) -> int:
@@ -105,21 +109,7 @@ class FortuneRecord:
         Returns:
             New FortuneRecord with updated last_view_date
         """
-        return FortuneRecord(
-            user_id=self.user_id,
-            username=self.username,
-            date_str=self.date_str,
-            title=self.title,
-            star_count=self.star_count,
-            description=self.description,
-            extra_message=self.extra_message,
-            theme_color=self.theme_color,
-            image_cached=self.image_cached,
-            img_url=self.img_url,
-            last_view_date=last_view_date,
-            group_id=self.group_id,
-            session_id=self.session_id,
-        )
+        return replace(self, last_view_date=last_view_date)
 
     def with_refreshed_data(
         self, title: str, star_count: int, description: str, theme_color: str
@@ -135,20 +125,14 @@ class FortuneRecord:
         Returns:
             New FortuneRecord with updated data
         """
-        return FortuneRecord(
-            user_id=self.user_id,
-            username=self.username,
-            date_str=self.date_str,
+        return replace(
+            self,
             title=title,
             star_count=star_count,
             description=description,
-            extra_message=self.extra_message,
             theme_color=theme_color,
             image_cached=False,
             img_url=None,
-            last_view_date=self.last_view_date,
-            group_id=self.group_id,
-            session_id=self.session_id,
         )
 
     @classmethod
@@ -164,7 +148,8 @@ class FortuneRecord:
         extra_message: str,
         theme_color: str,
         group_id: str | None = None,
-        session_id: str | None = None,
+        nonce: int = 0,
+        detail: FortuneDetail | None = None,
     ) -> FortuneRecord:
         """Create a new fortune record with defaults for image fields."""
         return cls(
@@ -180,7 +165,8 @@ class FortuneRecord:
             img_url=None,
             last_view_date=date_str,
             group_id=group_id,
-            session_id=session_id,
+            nonce=nonce,
+            detail=detail,
         )
 
     def with_image_cache(self, img_url: str | None) -> FortuneRecord:
@@ -192,46 +178,25 @@ class FortuneRecord:
         Returns:
             New FortuneRecord with image_cached=True
         """
-        return FortuneRecord(
-            user_id=self.user_id,
-            username=self.username,
-            date_str=self.date_str,
-            title=self.title,
-            star_count=self.star_count,
-            description=self.description,
-            extra_message=self.extra_message,
-            theme_color=self.theme_color,
-            image_cached=True,
-            img_url=img_url,
-            last_view_date=self.last_view_date,
-            group_id=self.group_id,
-            session_id=self.session_id,
-        )
+        return replace(self, image_cached=True, img_url=img_url)
 
     def with_presentation(
         self,
         *,
         username: str,
         group_id: str | None,
-        session_id: str | None = None,
         invalidate_image_cache: bool = False,
     ) -> FortuneRecord:
         """Return new record with current display fields."""
-        return FortuneRecord(
-            user_id=self.user_id,
-            username=username,
-            date_str=self.date_str,
-            title=self.title,
-            star_count=self.star_count,
-            description=self.description,
-            extra_message=self.extra_message,
-            theme_color=self.theme_color,
-            image_cached=False if invalidate_image_cache else self.image_cached,
-            img_url=None if invalidate_image_cache else self.img_url,
-            last_view_date=self.last_view_date,
-            group_id=group_id,
-            session_id=session_id,
-        )
+        changes: dict[str, Any] = {"username": username, "group_id": group_id}
+        if invalidate_image_cache:
+            changes["image_cached"] = False
+            changes["img_url"] = None
+        return replace(self, **changes)
+
+    def with_detail(self, detail: FortuneDetail | None, nonce: int) -> FortuneRecord:
+        """Return new record carrying freshly derived detail and nonce."""
+        return replace(self, detail=detail, nonce=nonce)
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,16 +209,22 @@ class FortuneWeights:
 
     weights: tuple[float, ...] = tuple(DEFAULT_WEIGHTS)
 
-    def calculate_star(self) -> int:
+    def calculate_star(self, rng: Any | None = None) -> int:
         """Calculate fortune star based on weights.
+
+        Args:
+            rng: Seeded ``random.Random``.  When omitted a module-level RNG is
+                used, which keeps the old behaviour for ad-hoc callers while the
+                fortune service always passes a deterministic one.
 
         Returns:
             Star rating (0-7)
         """
         import random
 
+        picker = rng if rng is not None else random
         total_weight = sum(self.weights)
-        random_value = random.random() * total_weight
+        random_value = picker.random() * total_weight
         current_weight = 0.0
 
         for i, w in enumerate(self.weights):
@@ -345,15 +316,10 @@ class FortuneGenerationRequest:
     username: str
     date_str: str
     group_id: str | None = None
-    session_id: str | None = None
 
     @classmethod
     def for_today(
-        cls,
-        user_id: str,
-        username: str,
-        group_id: str | None = None,
-        session_id: str | None = None,
+        cls, user_id: str, username: str, group_id: str | None = None
     ) -> FortuneGenerationRequest:
         """Create request for today's fortune.
 
@@ -366,4 +332,4 @@ class FortuneGenerationRequest:
             New FortuneGenerationRequest
         """
         today_str = date.today().isoformat()
-        return cls(user_id, username, today_str, group_id, session_id)
+        return cls(user_id, username, today_str, group_id)

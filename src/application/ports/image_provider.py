@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit, urlunsplit
 
-from ...domain.setu import SetuRequest
+from ...domain.setu import ImageMeta, SetuRequest
 from ...shared import get_logger
 from ..setu.dto import ImagePayload
 
@@ -20,8 +20,8 @@ class SetuImageProvider:
         tags: list[str],
         r18: bool,
         exclude_ai: bool = True,
-    ) -> list[str]:
-        """从 API 获取图片 URL 列表。
+    ) -> list[ImageMeta]:
+        """从 API 获取图片及元数据。
 
         参数:
             num: 要获取的图片数量。
@@ -30,7 +30,7 @@ class SetuImageProvider:
             exclude_ai: 是否排除 AI 生成的作品。
 
         返回:
-            图片 URL 列表。
+            ``ImageMeta`` 列表；``url`` 为必填字段，其余字段在 API 未提供时留空。
         """
         raise NotImplementedError
 

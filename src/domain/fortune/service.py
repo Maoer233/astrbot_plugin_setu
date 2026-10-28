@@ -8,14 +8,56 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import date
+from typing import Any
 
 from ...application.ports import FortuneRepository
+from .detail import DEFAULT_MASTER_KEY, build_detail, make_rng
+from .detail_dto import FortuneDetail
 from .entities import (
     FortuneGenerationRequest,
     FortuneRecord,
     FortuneTheme,
     FortuneWeights,
 )
+
+
+class FortuneOptions:
+    """Toggles for the locally derived detail block."""
+
+    __slots__ = (
+        "master_key",
+        "enable_yi_ji",
+        "enable_lucky",
+        "enable_dims",
+        "enable_hour",
+        "enable_blessing",
+        "enable_sign",
+        "enable_lunar",
+        "sign_count",
+    )
+
+    def __init__(
+        self,
+        *,
+        master_key: str = DEFAULT_MASTER_KEY,
+        enable_yi_ji: bool = True,
+        enable_lucky: bool = True,
+        enable_dims: bool = True,
+        enable_hour: bool = True,
+        enable_blessing: bool = True,
+        enable_sign: bool = True,
+        enable_lunar: bool = True,
+        sign_count: int = 1,
+    ) -> None:
+        self.master_key = str(master_key or DEFAULT_MASTER_KEY)
+        self.enable_yi_ji = bool(enable_yi_ji)
+        self.enable_lucky = bool(enable_lucky)
+        self.enable_dims = bool(enable_dims)
+        self.enable_hour = bool(enable_hour)
+        self.enable_blessing = bool(enable_blessing)
+        self.enable_sign = bool(enable_sign)
+        self.enable_lunar = bool(enable_lunar)
+        self.sign_count = max(1, int(sign_count))
 
 
 class FortuneService:
@@ -30,6 +72,10 @@ class FortuneService:
         repository: FortuneRepository,
         weights: FortuneWeights | None = None,
         theme: FortuneTheme | None = None,
+        options: FortuneOptions | None = None,
+        pools_provider: Callable[[], Any] | None = None,
+        lunar_provider: Callable[[str], Any] | None = None,
+        image_guard: Callable[[bytes], bool] | None = None,
     ) -> None:
         """Initialize fortune service.
 
@@ -37,10 +83,20 @@ class FortuneService:
             repository: Fortune repository for persistence
             weights: Fortune weights (uses default if None)
             theme: Fortune theme (uses default if None)
+            options: Detail-generation options (uses defaults if None)
+            pools_provider: Returns the local word pools; injected by the
+                infrastructure layer so the domain stays I/O free.
+            lunar_provider: Maps an ISO date string to lunar info or None.
+            image_guard: Validates cached image bytes; injected so the domain
+                does not import infrastructure.
         """
         self._repo = repository
         self._weights = weights or FortuneWeights.default()
         self._theme = theme or FortuneTheme.default()
+        self._options = options or FortuneOptions()
+        self._pools_provider = pools_provider
+        self._lunar_provider = lunar_provider
+        self._image_guard = image_guard
 
     async def get_or_create_fortune(
         self, request: FortuneGenerationRequest, force_refresh: bool = False
@@ -62,11 +118,33 @@ class FortuneService:
         if existing and not force_refresh:
             updated = await self._prepare_existing_record(existing, request)
             updated = updated.with_last_view_date(request.date_str)
+            # 旧记录里没有 detail（这次升级之前写入的），按确定性种子补齐，
+            # 保证同一天同一个人补出来的内容与全新生成完全一致。
+            if updated.detail is None:
+                updated = updated.with_detail(
+                    self._build_detail(updated), updated.nonce
+                )
             await self._repo.save_fortune(updated)
             return updated
 
         # Generate new fortune
-        star_count = self._weights.calculate_star()
+        nonce = 0 if not existing else existing.nonce + 1
+        record = self._generate(request, nonce)
+
+        await self._repo.save_fortune(record)
+        return record
+
+    def _generate(
+        self, request: FortuneGenerationRequest, nonce: int = 0
+    ) -> FortuneRecord:
+        """Build a fresh fortune record deterministically."""
+        rng = make_rng(
+            request.user_id,
+            request.date_str,
+            self._options.master_key,
+            nonce,
+        )
+        star_count = self._weights.calculate_star(rng)
         title = self._theme.get_title(star_count)
         description = self._theme.get_message(star_count)
         theme_color = self._theme.get_theme_color(star_count)
@@ -82,11 +160,43 @@ class FortuneService:
             extra_message=extra_message,
             theme_color=theme_color,
             group_id=request.group_id,
-            session_id=request.session_id,
+            nonce=nonce,
         )
+        return record.with_detail(self._build_detail(record), nonce)
 
-        await self._repo.save_fortune(record)
-        return record
+    def _build_detail(self, record: FortuneRecord) -> FortuneDetail:
+        """Derive the local detail block for an existing record."""
+        pools = None
+        if self._pools_provider is not None:
+            try:
+                pools = self._pools_provider()
+            except Exception:  # a broken data file must not break the card
+                pools = None
+
+        lunar_info = None
+        if self._options.enable_lunar and self._lunar_provider is not None:
+            try:
+                lunar_info = self._lunar_provider(record.date_str)
+            except Exception:
+                lunar_info = None
+
+        return build_detail(
+            user_id=record.user_id,
+            date_str=record.date_str,
+            star_count=record.star_count,
+            master_key=self._options.master_key,
+            nonce=record.nonce,
+            pools=pools,
+            lunar_info=lunar_info,
+            enable_yi_ji=self._options.enable_yi_ji,
+            enable_lucky=self._options.enable_lucky,
+            enable_dims=self._options.enable_dims,
+            enable_hour=self._options.enable_hour,
+            enable_blessing=self._options.enable_blessing,
+            enable_sign=self._options.enable_sign,
+            enable_lunar=self._options.enable_lunar,
+            sign_count=self._options.sign_count,
+        )
 
     async def refresh_fortune(self, request: FortuneGenerationRequest) -> FortuneRecord:
         """Refresh user's fortune (generate new).
@@ -97,14 +207,17 @@ class FortuneService:
         Returns:
             New FortuneRecord
         """
-        # Delete existing fortune first
-        await self._repo.delete_fortune(request.user_id, request.date_str)
+        # 用递增 nonce 而不是删除后重建：同一天多次刷新会得到不同结果，
+        # 同时保留"可复现"性质（nonce 落库，随时能重算出同一张卡）。
+        existing = await self._repo.get_today_fortune(request)
+        next_nonce = (existing.nonce + 1) if existing else 1
 
         # Delete cached image
         await self._repo.delete_cached_image(request.user_id, request.date_str)
 
-        # Generate new fortune
-        return await self.get_or_create_fortune(request, force_refresh=True)
+        record = self._generate(request, next_nonce)
+        await self._repo.save_fortune(record)
+        return record
 
     async def refresh_group_fortunes(
         self, group_id: str, date_str: str | None = None
@@ -200,7 +313,6 @@ class FortuneService:
         changed = (
             existing.username != request.username
             or existing.group_id != request.group_id
-            or existing.session_id != request.session_id
         )
         if not changed:
             return existing
@@ -208,7 +320,6 @@ class FortuneService:
         updated = existing.with_presentation(
             username=request.username,
             group_id=request.group_id,
-            session_id=request.session_id,
             invalidate_image_cache=True,
         )
         await self._repo.delete_cached_image(existing.user_id, existing.date_str)
@@ -241,16 +352,28 @@ class FortuneService:
             date_str: Date string
 
         Returns:
-            Image bytes if cache exists, None otherwise
+            Image bytes if cache exists and is a real image, None otherwise
         """
         cache_path = await self._repo.get_cached_image_path(user_id, date_str)
         if cache_path:
             try:
                 import asyncio
 
-                return await asyncio.to_thread(cache_path.read_bytes)
+                data = await asyncio.to_thread(cache_path.read_bytes)
             except OSError as e:
                 logging.debug("Failed to read cached image: %s", e)
+                return None
+            if self._image_guard is not None and not self._image_guard(data):
+                # 旧版本可能把错误页/空响应缓存成了图片，读到就清掉重画。
+                logging.warning(
+                    "[fortune] dropping invalid cached image: user=%s, date=%s, bytes=%d",
+                    user_id,
+                    date_str,
+                    len(data),
+                )
+                await self._repo.delete_cached_image(user_id, date_str)
+                return None
+            return data
         return None
 
     async def cleanup_cache(self, date_str: str | None = None) -> int:
