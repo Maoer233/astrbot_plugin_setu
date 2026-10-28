@@ -1,6 +1,6 @@
 name: astrbot_plugin_setu
 display_name: 瑟瑟！
-version: v3.0.0-maoer.1
+version: v2.3.0
 author: Maoer233
 desc: 随机福利图与随机本子文件插件，支持标签与数量、图片分级控制，PDF/ZIP 两种本子发送格式，以及全本地渲染的今日运势卡片（宜忌/分运/幸运指南/观音灵签/农历）。
 repo: https://github.com/Maoer233/astrbot_plugin_setu
