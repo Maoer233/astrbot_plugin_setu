@@ -3,7 +3,7 @@
 本文记录 setu 图片发送在 OneBot / NapCat 链路上的两层发送限制实测数据，以及「多图发不出」的排查结论。修改 `src/infrastructure/sending/`（`image_sender.py`、`send_strategies.py`、`napcat_stream.py`）时优先参考本文。
 
 > [!IMPORTANT]
-> 数据采集：2026-06-12，dev runtime 本地 NapCat（反向 WS client 连 AstrBot `6199`，bot QQ `1357811947`，目标群 `772654791`）。组件版本：`aiocqhttp 1.4.4`、`hypercorn 0.18.0`、`quart 0.20.0`、`websockets 15.0.1`。NapCat 版本、NTQQ 协议与 ASGI 默认值后续都可能变动，引用前按当前 runtime 复测。
+> 数据采集：2026-06-12，dev runtime 本地 NapCat（反向 WS client 连 AstrBot `6199`，bot QQ `[BOT_QQ]`，目标群 `[GROUP_ID]`）。组件版本：`aiocqhttp 1.4.4`、`hypercorn 0.18.0`、`quart 0.20.0`、`websockets 15.0.1`。NapCat 版本、NTQQ 协议与 ASGI 默认值后续都可能变动，引用前按当前 runtime 复测。
 > 本文区分**已端到端实测确证**与**代码/默认值推断**两类结论，不把推断写成事实。
 
 ## 发送数据流
